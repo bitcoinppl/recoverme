@@ -8,10 +8,10 @@ use std::{
 };
 
 use crate::{
-    backend::create_deriver,
+    backend::{create_configured_deriver, create_deriver},
     domain::{
-        BackendKind, CandidateBatch, CandidateCursor, CandidateId, SearchPhase, SecretMnemonic,
-        VerificationTarget,
+        BackendConfiguration, BackendKind, CandidateBatch, CandidateCursor, CandidateId,
+        SearchPhase, SecretMnemonic, VerificationTarget,
     },
     error::RecoverError,
     search::RecoveryPlan,
@@ -37,7 +37,9 @@ pub fn benchmark_backend(
     backend: BackendKind,
     sample_size: usize,
 ) -> Result<BenchmarkRecord, RecoverError> {
-    benchmark_backend_with_config(plan, state, mnemonic, backend, sample_size, None, None)
+    let benchmark = measure_backend(plan, state, mnemonic, backend, sample_size, None)?;
+    state.record_benchmark(benchmark.clone())?;
+    Ok(benchmark)
 }
 
 /// Benchmark a backend with an explicit runtime configuration
@@ -47,15 +49,52 @@ pub fn benchmark_backend_with_config(
     mnemonic: &SecretMnemonic,
     backend: BackendKind,
     sample_size: usize,
-    batch_size: Option<usize>,
-    workgroup_size: Option<u32>,
+    configuration: BackendConfiguration,
 ) -> Result<BenchmarkRecord, RecoverError> {
-    let mut deriver = create_deriver(backend, mnemonic)?;
-    if let Some(batch_size) = batch_size {
-        deriver.configure(batch_size, workgroup_size)?;
-    } else if workgroup_size.is_some() {
-        deriver.configure(deriver.preferred_batch_size(), workgroup_size)?;
-    }
+    let benchmark = measure_backend(
+        plan,
+        state,
+        mnemonic,
+        backend,
+        sample_size,
+        Some(configuration),
+    )?;
+    state.record_benchmark(benchmark.clone())?;
+    Ok(benchmark)
+}
+
+/// Measure an explicit backend configuration without changing recovery state
+pub fn measure_backend_with_config(
+    plan: &RecoveryPlan,
+    state: &RecoveryState,
+    mnemonic: &SecretMnemonic,
+    backend: BackendKind,
+    sample_size: usize,
+    configuration: BackendConfiguration,
+) -> Result<BenchmarkRecord, RecoverError> {
+    measure_backend(
+        plan,
+        state,
+        mnemonic,
+        backend,
+        sample_size,
+        Some(configuration),
+    )
+}
+
+fn measure_backend(
+    plan: &RecoveryPlan,
+    state: &RecoveryState,
+    mnemonic: &SecretMnemonic,
+    backend: BackendKind,
+    sample_size: usize,
+    configuration: Option<BackendConfiguration>,
+) -> Result<BenchmarkRecord, RecoverError> {
+    let mut deriver = if let Some(configuration) = configuration {
+        create_configured_deriver(backend, mnemonic, configuration)?
+    } else {
+        create_deriver(backend, mnemonic)?
+    };
     let sample_size = sample_size.max(1);
     let mut cursor = CandidateCursor::default();
     let generation_started = Instant::now();
@@ -98,6 +137,8 @@ pub fn benchmark_backend_with_config(
         candidates: candidates.len(),
         batch_size: deriver.preferred_batch_size(),
         workgroup_size: deriver.workgroup_size(),
+        cpu_share_percent: deriver.cpu_share_percent(),
+        hardware_signature: Some(deriver.hardware_signature()),
         seeds_per_second: candidates.len() as f64 / seed_elapsed.as_secs_f64(),
         checks_per_second: candidates.len() as f64 / pipeline_elapsed.as_secs_f64(),
         verification_per_second: candidates.len() as f64 / verify_elapsed.as_secs_f64(),
@@ -108,7 +149,6 @@ pub fn benchmark_backend_with_config(
             .unwrap_or_default()
             .as_secs(),
     };
-    state.record_benchmark(benchmark.clone())?;
     Ok(benchmark)
 }
 
@@ -126,10 +166,21 @@ pub fn run_recovery(
         return Err(RecoverError::PendingMatches);
     }
 
-    let mut deriver = create_deriver(backend, mnemonic)?;
-    if let Some(benchmark) = state.latest_benchmark(backend) {
-        deriver.configure(benchmark.batch_size, benchmark.workgroup_size)?;
-    }
+    let mut deriver = if let Some(benchmark) = state.latest_benchmark(backend) {
+        let deriver = create_configured_deriver(backend, mnemonic, benchmark.configuration()?)?;
+        if benchmark
+            .hardware_signature
+            .as_ref()
+            .is_some_and(|expected| deriver.hardware_signature() != *expected)
+        {
+            return Err(RecoverError::InvalidSetting(format!(
+                "{backend} was tuned for different hardware; rerun its benchmark autotuner"
+            )));
+        }
+        deriver
+    } else {
+        create_deriver(backend, mnemonic)?
+    };
     let batch_size = deriver.preferred_batch_size().max(1);
     let rejected = state
         .runtime()
@@ -324,6 +375,61 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome, RunOutcome::Interrupted);
+        assert_eq!(state.runtime().cursor, CandidateCursor::default());
+    }
+
+    #[test]
+    fn recovery_rejects_a_configuration_tuned_for_different_hardware() {
+        let directory = tempdir().unwrap();
+        let mnemonic = SecretMnemonic::new(PUBLIC_TEST_MNEMONIC.to_owned());
+        let words = WrittenWords::new(vec!["alpha".into()]).unwrap();
+        let settings = RecoverySettings {
+            max_replacements: 0,
+            ..RecoverySettings::default()
+        };
+        let plan = RecoveryPlan::compile(&words, settings.clone()).unwrap();
+        let fingerprint = "00000000".parse::<TargetFingerprint>().unwrap();
+        let inputs = RecoveryInputs {
+            mnemonic: mnemonic.clone(),
+            recipe: crate::domain::RecoveryRecipe::from_written_words(&words),
+            written_words: words,
+        };
+        let mut state = RecoveryState::open_or_create(
+            directory.path(),
+            recovery_spec_hash(&inputs, fingerprint, &settings),
+            fingerprint,
+            settings,
+            plan.phase_summaries(),
+        )
+        .unwrap();
+        state
+            .record_benchmark(BenchmarkRecord {
+                backend: BackendKind::Cpu,
+                candidates: 1,
+                batch_size: 128,
+                workgroup_size: None,
+                cpu_share_percent: None,
+                hardware_signature: Some("different-hardware".into()),
+                seeds_per_second: 1.0,
+                checks_per_second: 1.0,
+                verification_per_second: 1.0,
+                generation_per_second: 1.0,
+                device: "different-hardware".into(),
+                measured_at_unix: 1,
+            })
+            .unwrap();
+
+        let result = run_recovery(
+            &plan,
+            &mut state,
+            &mnemonic,
+            &VerificationTarget::Fingerprint(fingerprint),
+            BackendKind::Cpu,
+            SearchPhase::WrittenLower,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        assert!(matches!(result, Err(RecoverError::InvalidSetting(_))));
         assert_eq!(state.runtime().cursor, CandidateCursor::default());
     }
 }

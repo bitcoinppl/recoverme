@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fmt, str::FromStr, sync::OnceLock};
+use std::{collections::HashSet, fmt, num::NonZeroUsize, str::FromStr, sync::OnceLock};
 
 use bip32::XPub;
 use clap::ValueEnum;
@@ -234,6 +234,8 @@ pub enum BackendKind {
     Hybrid,
     /// CubeCL's CUDA runtime
     Cuda,
+    /// Concurrent CPU and CUDA runtime with an autotuned split
+    CudaHybrid,
 }
 
 impl fmt::Display for BackendKind {
@@ -245,8 +247,161 @@ impl fmt::Display for BackendKind {
             Self::Metal => "metal",
             Self::Hybrid => "hybrid",
             Self::Cuda => "cuda",
+            Self::CudaHybrid => "cuda-hybrid",
         };
         formatter.write_str(value)
+    }
+}
+
+/// Nonzero candidate count processed as one backend batch
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchSize(NonZeroUsize);
+
+impl BatchSize {
+    /// Return the validated batch size
+    pub const fn get(self) -> usize {
+        self.0.get()
+    }
+}
+
+impl TryFrom<usize> for BatchSize {
+    type Error = RecoverError;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        NonZeroUsize::new(value).map(Self).ok_or_else(|| {
+            RecoverError::InvalidSetting("backend batch size must be greater than zero".into())
+        })
+    }
+}
+
+/// CubeCL workgroup size supported by the recovery kernels
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkgroupSize(u32);
+
+impl WorkgroupSize {
+    /// Return the validated workgroup size
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl TryFrom<u32> for WorkgroupSize {
+    type Error = RecoverError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        if !(32..=256).contains(&value) || !value.is_power_of_two() {
+            return Err(RecoverError::InvalidSetting(
+                "CubeCL workgroup size must be a power of two from 32 through 256".into(),
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Nonzero CPU percentage assigned by an explicit hybrid backend
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuShare(u8);
+
+impl CpuShare {
+    /// Return the validated CPU percentage
+    pub const fn percent(self) -> u8 {
+        self.0
+    }
+}
+
+impl TryFrom<u8> for CpuShare {
+    type Error = RecoverError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        if !(1..=99).contains(&value) {
+            return Err(RecoverError::InvalidSetting(
+                "hybrid CPU share must be from 1 through 99 percent".into(),
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Validated runtime configuration accepted by recovery backends
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendConfiguration {
+    /// CPU-only configuration
+    Cpu {
+        /// Candidate batch size
+        batch_size: BatchSize,
+    },
+    /// CubeCL accelerator configuration without CPU participation
+    Cube {
+        /// Candidate batch size
+        batch_size: BatchSize,
+        /// Accelerator workgroup size
+        workgroup_size: WorkgroupSize,
+    },
+    /// Concurrent CPU and CubeCL accelerator configuration
+    Hybrid {
+        /// Candidate batch size
+        batch_size: BatchSize,
+        /// Accelerator workgroup size
+        workgroup_size: WorkgroupSize,
+        /// Percentage of candidates assigned to the CPU
+        cpu_share: CpuShare,
+    },
+}
+
+impl BackendConfiguration {
+    /// Construct a CPU-only configuration
+    pub fn cpu(batch_size: usize) -> Result<Self, RecoverError> {
+        Ok(Self::Cpu {
+            batch_size: batch_size.try_into()?,
+        })
+    }
+
+    /// Construct a CubeCL accelerator configuration
+    pub fn cube(batch_size: usize, workgroup_size: u32) -> Result<Self, RecoverError> {
+        Ok(Self::Cube {
+            batch_size: batch_size.try_into()?,
+            workgroup_size: workgroup_size.try_into()?,
+        })
+    }
+
+    /// Construct a concurrent CPU and CubeCL accelerator configuration
+    pub fn hybrid(
+        batch_size: usize,
+        workgroup_size: u32,
+        cpu_share_percent: u8,
+    ) -> Result<Self, RecoverError> {
+        Ok(Self::Hybrid {
+            batch_size: batch_size.try_into()?,
+            workgroup_size: workgroup_size.try_into()?,
+            cpu_share: cpu_share_percent.try_into()?,
+        })
+    }
+
+    /// Candidate batch size shared by every configuration
+    pub const fn batch_size(self) -> BatchSize {
+        match self {
+            Self::Cpu { batch_size }
+            | Self::Cube { batch_size, .. }
+            | Self::Hybrid { batch_size, .. } => batch_size,
+        }
+    }
+
+    /// Optional accelerator workgroup size
+    pub const fn workgroup_size(self) -> Option<WorkgroupSize> {
+        match self {
+            Self::Cpu { .. } => None,
+            Self::Cube { workgroup_size, .. } | Self::Hybrid { workgroup_size, .. } => {
+                Some(workgroup_size)
+            }
+        }
+    }
+
+    /// Optional hybrid CPU share
+    pub const fn cpu_share(self) -> Option<CpuShare> {
+        match self {
+            Self::Cpu { .. } | Self::Cube { .. } => None,
+            Self::Hybrid { cpu_share, .. } => Some(cpu_share),
+        }
     }
 }
 
@@ -749,5 +904,25 @@ pub(crate) mod u128_string {
     {
         let value = String::deserialize(deserializer)?;
         value.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_configuration_rejects_impossible_runtime_settings() {
+        assert!(BackendConfiguration::cpu(0).is_err());
+        assert!(BackendConfiguration::cube(1, 31).is_err());
+        assert!(BackendConfiguration::cube(1, 48).is_err());
+        assert!(BackendConfiguration::cube(1, 512).is_err());
+        assert!(BackendConfiguration::hybrid(1, 64, 0).is_err());
+        assert!(BackendConfiguration::hybrid(1, 64, 100).is_err());
+
+        let configuration = BackendConfiguration::hybrid(65_536, 128, 5).unwrap();
+        assert_eq!(configuration.batch_size().get(), 65_536);
+        assert_eq!(configuration.workgroup_size().unwrap().get(), 128);
+        assert_eq!(configuration.cpu_share().unwrap().percent(), 5);
     }
 }

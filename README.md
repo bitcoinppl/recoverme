@@ -127,15 +127,57 @@ cargo build --release --features metal
 cargo build --release --features cuda
 ```
 
-The Metal build also provides a `hybrid` backend. Benchmark on the target
-machine instead of assuming an accelerator is faster.
+The Metal build also provides a fixed-share `hybrid` backend. The CUDA build
+uses a GPU-only `cuda` backend by default and provides `cuda-hybrid` only after
+it has been tuned on the target machine.
 
 ### Experimental CUDA support
 
 The Rust CubeCL and JAX CUDA backends are experimental and source-only. Neither
 has been validated on NVIDIA hardware for this release, and CUDA binaries are
-not included in the release downloads. Compare CUDA results with the CPU
-backend before using it for a recovery.
+not included in the release downloads.
+
+The Rust CUDA backend derives BIP39 seeds on the GPU. With a master XPUB
+target, it also derives and filters BIP32 master chain codes on the GPU, copies
+back only the compacted survivor indices, and performs full public-key
+confirmation on the CPU. Fingerprint-only targets still require CPU
+secp256k1 and HASH160 verification for every derived seed.
+
+Tune and use the normal GPU-only path with:
+
+```sh
+recoverme benchmark \
+  --state-dir recovery-state \
+  --backend cuda \
+  --autotune
+
+recoverme run \
+  --state-dir recovery-state \
+  --through written-case \
+  --backend cuda
+```
+
+An optional CPU-assisted CUDA mode is selected separately:
+
+```sh
+recoverme benchmark \
+  --state-dir recovery-state \
+  --backend cuda-hybrid \
+  --autotune
+```
+
+The tuner measures complete checks rather than seed derivations alone. It tests
+small CPU shares around the measured CPU/CUDA rate ratio and retains
+`cuda-hybrid` only when its median complete-check rate is at least 3% faster
+than GPU-only CUDA after synchronization and transfer costs. The saved choice
+is bound to the CUDA device UUID, compute capability, driver version, CPU
+model, and Rayon thread count; retune after hardware, driver, or CPU-thread
+changes.
+
+CUDA address verification remains a benchmark-only experiment. Moving
+fingerprint or address secp256k1 verification onto CUDA requires independent
+correctness testing and at least a 10% complete-check improvement over the
+CPU-assisted pipeline before it can become a recovery backend.
 
 Testing and code contributions are welcome. If you have an NVIDIA GPU, please
 [open an issue](https://github.com/bitcoinppl/recoverme/issues) with the GPU
@@ -276,6 +318,10 @@ is intentionally not migrated; create a new state directory after upgrading.
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
+cargo check --all-targets --features cuda
+
+# requires an NVIDIA GPU
+cargo test --features cuda cuda_ -- --ignored
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).

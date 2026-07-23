@@ -9,8 +9,9 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::{
     domain::{
-        BackendKind, Candidate, CandidateCursor, CandidateId, MasterXpubTarget, PhaseSummary,
-        RecoverySettings, SearchPhase, TargetFingerprint, VerificationTarget, ALGORITHM_VERSION,
+        BackendConfiguration, BackendKind, Candidate, CandidateCursor, CandidateId,
+        MasterXpubTarget, PhaseSummary, RecoverySettings, SearchPhase, TargetFingerprint,
+        VerificationTarget, ALGORITHM_VERSION,
     },
     error::RecoverError,
 };
@@ -53,6 +54,12 @@ pub struct BenchmarkRecord {
     pub batch_size: usize,
     /// Accelerator workgroup size when applicable
     pub workgroup_size: Option<u32>,
+    /// CPU percentage used by an explicit hybrid backend
+    #[serde(default)]
+    pub cpu_share_percent: Option<u8>,
+    /// Hardware identity for which this measurement is valid
+    #[serde(default)]
+    pub hardware_signature: Option<String>,
     /// BIP39 seed derivations per second
     pub seeds_per_second: f64,
     /// Sustained checks per second with candidate preparation overlapped
@@ -67,6 +74,45 @@ pub struct BenchmarkRecord {
     pub device: String,
     /// Measurement time as Unix seconds
     pub measured_at_unix: u64,
+}
+
+impl BenchmarkRecord {
+    /// Reconstruct and validate the selected runtime configuration
+    pub fn configuration(&self) -> Result<BackendConfiguration, RecoverError> {
+        match self.backend {
+            BackendKind::Cpu => BackendConfiguration::cpu(self.batch_size),
+            BackendKind::CubeCpu | BackendKind::Metal | BackendKind::Cuda => {
+                BackendConfiguration::cube(
+                    self.batch_size,
+                    self.workgroup_size.ok_or_else(|| {
+                        RecoverError::InvalidSetting(format!(
+                            "{} benchmark is missing a workgroup size",
+                            self.backend
+                        ))
+                    })?,
+                )
+            }
+            BackendKind::Hybrid | BackendKind::CudaHybrid => BackendConfiguration::hybrid(
+                self.batch_size,
+                self.workgroup_size.ok_or_else(|| {
+                    RecoverError::InvalidSetting(format!(
+                        "{} benchmark is missing a workgroup size",
+                        self.backend
+                    ))
+                })?,
+                self.cpu_share_percent
+                    .or((self.backend == BackendKind::Hybrid).then_some(35))
+                    .ok_or_else(|| {
+                        RecoverError::InvalidSetting(
+                            "cuda-hybrid benchmark is missing its CPU share".into(),
+                        )
+                    })?,
+            ),
+            BackendKind::Auto => Err(RecoverError::InvalidSetting(
+                "auto cannot be stored as a benchmark backend".into(),
+            )),
+        }
+    }
 }
 
 /// Manual disposition of a wallet-identity match
@@ -275,7 +321,18 @@ impl RecoveryState {
 
     /// Record a backend benchmark
     pub fn record_benchmark(&mut self, benchmark: BenchmarkRecord) -> Result<(), RecoverError> {
+        self.runtime
+            .benchmarks
+            .retain(|record| record.backend != benchmark.backend);
         self.runtime.benchmarks.push(benchmark);
+        self.save_runtime()
+    }
+
+    /// Remove the selected benchmark for one backend
+    pub fn clear_benchmark(&mut self, backend: BackendKind) -> Result<(), RecoverError> {
+        self.runtime
+            .benchmarks
+            .retain(|record| record.backend != backend);
         self.save_runtime()
     }
 
@@ -453,6 +510,23 @@ mod tests {
         .unwrap()
     }
 
+    fn benchmark(backend: BackendKind, checks_per_second: f64) -> BenchmarkRecord {
+        BenchmarkRecord {
+            backend,
+            candidates: 1_024,
+            batch_size: 65_536,
+            workgroup_size: (backend != BackendKind::Cpu).then_some(64),
+            cpu_share_percent: (backend == BackendKind::CudaHybrid).then_some(5),
+            hardware_signature: Some("test-hardware".into()),
+            seeds_per_second: checks_per_second,
+            checks_per_second,
+            verification_per_second: checks_per_second,
+            generation_per_second: checks_per_second,
+            device: "test-device".into(),
+            measured_at_unix: 1,
+        }
+    }
+
     #[test]
     fn cursor_and_matches_commit_in_one_runtime_document() {
         let directory = tempdir().unwrap();
@@ -520,5 +594,48 @@ mod tests {
             RecoveryState::open_existing(directory.path()),
             Err(RecoverError::UnsupportedStateVersion(0))
         ));
+    }
+
+    #[test]
+    fn benchmark_selection_is_unique_per_backend_and_can_be_cleared() {
+        let directory = tempdir().unwrap();
+        let mut state = state(directory.path());
+        state
+            .record_benchmark(benchmark(BackendKind::Cuda, 10.0))
+            .unwrap();
+        state
+            .record_benchmark(benchmark(BackendKind::Cuda, 20.0))
+            .unwrap();
+
+        assert_eq!(state.runtime().benchmarks.len(), 1);
+        assert_eq!(
+            state
+                .latest_benchmark(BackendKind::Cuda)
+                .unwrap()
+                .checks_per_second,
+            20.0
+        );
+
+        state.clear_benchmark(BackendKind::Cuda).unwrap();
+        assert!(state.latest_benchmark(BackendKind::Cuda).is_none());
+    }
+
+    #[test]
+    fn cuda_hybrid_configuration_requires_a_persisted_cpu_share() {
+        let mut record = benchmark(BackendKind::CudaHybrid, 20.0);
+        record.cpu_share_percent = None;
+
+        assert!(record.configuration().is_err());
+
+        record.backend = BackendKind::Hybrid;
+        assert_eq!(
+            record
+                .configuration()
+                .unwrap()
+                .cpu_share()
+                .unwrap()
+                .percent(),
+            35
+        );
     }
 }

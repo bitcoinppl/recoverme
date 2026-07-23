@@ -1,11 +1,11 @@
 use crate::{
     crypto::{CpuSeedDeriver, RecoveryBackend},
-    domain::{BackendKind, SecretMnemonic},
+    domain::{BackendConfiguration, BackendKind, SecretMnemonic},
     error::RecoverError,
     state::RecoveryState,
 };
 
-#[cfg(all(feature = "metal", target_os = "macos"))]
+#[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cuda"))]
 use crate::hybrid_backend::HybridBackend;
 
 #[cfg(any(
@@ -32,6 +32,8 @@ fn compiled_cube_backends() -> Vec<BackendKind> {
         BackendKind::Hybrid,
         #[cfg(feature = "cuda")]
         BackendKind::Cuda,
+        #[cfg(feature = "cuda")]
+        BackendKind::CudaHybrid,
     ];
     backends.to_vec()
 }
@@ -68,9 +70,35 @@ pub fn create_deriver(
         #[cfg(all(feature = "metal", target_os = "macos"))]
         BackendKind::Metal => Ok(Box::new(CubeSeedDeriver::metal(mnemonic)?)),
         #[cfg(all(feature = "metal", target_os = "macos"))]
-        BackendKind::Hybrid => Ok(Box::new(HybridBackend::new(mnemonic)?)),
+        BackendKind::Hybrid => Ok(Box::new(HybridBackend::metal(mnemonic)?)),
         #[cfg(feature = "cuda")]
         BackendKind::Cuda => Ok(Box::new(CubeSeedDeriver::cuda(mnemonic)?)),
+        BackendKind::CudaHybrid => Err(RecoverError::BackendUnavailable(
+            "cuda-hybrid requires a persisted autotuned configuration".into(),
+        )),
         unavailable => Err(RecoverError::BackendUnavailable(unavailable.to_string())),
     }
+}
+
+/// Construct a concrete backend with a validated runtime configuration
+pub fn create_configured_deriver(
+    backend: BackendKind,
+    mnemonic: &SecretMnemonic,
+    configuration: BackendConfiguration,
+) -> Result<Box<dyn RecoveryBackend>, RecoverError> {
+    #[cfg(feature = "cuda")]
+    if backend == BackendKind::CudaHybrid {
+        let Some(cpu_share) = configuration.cpu_share() else {
+            return Err(RecoverError::InvalidSetting(
+                "cuda-hybrid requires a nonzero CPU share".into(),
+            ));
+        };
+        let mut deriver = HybridBackend::cuda(mnemonic, cpu_share)?;
+        deriver.configure(configuration)?;
+        return Ok(Box::new(deriver));
+    }
+
+    let mut deriver = create_deriver(backend, mnemonic)?;
+    deriver.configure(configuration)?;
+    Ok(deriver)
 }

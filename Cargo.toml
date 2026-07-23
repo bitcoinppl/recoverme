@@ -15,7 +15,7 @@ categories = ["command-line-utilities", "cryptography"]
 default = []
 cube-cpu = ["dep:cubecl", "cubecl/std", "cubecl/stdlib", "cubecl/cpu"]
 metal = ["dep:cubecl", "cubecl/std", "cubecl/stdlib", "cubecl/metal"]
-cuda = ["dep:cubecl", "cubecl/std", "cubecl/stdlib", "cubecl/cuda"]
+cuda = ["dep:cubecl", "dep:cudarc", "cubecl/std", "cubecl/stdlib", "cubecl/cuda"]
 
 [dependencies]
 # cli
@@ -45,6 +45,7 @@ bip39 = "2"
 
 # accelerator
 cubecl = { version = "=0.10.0", default-features = false, optional = true }
+cudarc = { version = "=0.19.8", default-features = false, features = ["std", "driver", "fallback-dynamic-loading", "cuda-version-from-build-system", "fallback-latest"], optional = true }
 
 color-eyre = "0.6"
 

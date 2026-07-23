@@ -2812,6 +2812,7 @@ dependencies = [
  "color-eyre",
  "ctrlc",
  "cubecl",
+ "cudarc",
  "hex",
  "hmac",
  "log",

@@ -4,7 +4,9 @@ use zeroize::Zeroizing;
 
 use crate::{
     crypto::{matching_candidate_indices_for_target, RecoveryBackend, SeedBatch},
-    domain::{BackendKind, CandidateBatch, SecretMnemonic, VerificationTarget},
+    domain::{
+        BackendConfiguration, BackendKind, CandidateBatch, SecretMnemonic, VerificationTarget,
+    },
     error::RecoverError,
 };
 
@@ -146,7 +148,9 @@ impl CubeSeedDeriver {
     /// Construct the CubeCL CUDA runtime
     #[cfg(feature = "cuda")]
     pub fn cuda(mnemonic: &SecretMnemonic) -> Result<Self, RecoverError> {
-        Self::new::<cubecl::cuda::CudaRuntime>(CubeRuntimeKind::Cuda, mnemonic)
+        let mut deriver = Self::new::<cubecl::cuda::CudaRuntime>(CubeRuntimeKind::Cuda, mnemonic)?;
+        deriver.device_name = cuda_device_identity()?;
+        Ok(deriver)
     }
 
     fn new<R>(kind: CubeRuntimeKind, mnemonic: &SecretMnemonic) -> Result<Self, RecoverError>
@@ -179,6 +183,36 @@ impl CubeSeedDeriver {
     }
 }
 
+#[cfg(feature = "cuda")]
+fn cuda_device_identity() -> Result<String, RecoverError> {
+    let context = cudarc::driver::CudaContext::new(0).map_err(|error| {
+        RecoverError::BackendUnavailable(format!("CUDA device identity: {error}"))
+    })?;
+    let name = context.name().map_err(|error| {
+        RecoverError::BackendUnavailable(format!("CUDA device identity: {error}"))
+    })?;
+    let uuid = context.uuid().map_err(|error| {
+        RecoverError::BackendUnavailable(format!("CUDA device identity: {error}"))
+    })?;
+    let (major, minor) = context.compute_capability().map_err(|error| {
+        RecoverError::BackendUnavailable(format!("CUDA device identity: {error}"))
+    })?;
+    let mut driver_version = 0;
+    // the CUDA context is initialized above and the output pointer remains valid for the call
+    unsafe {
+        cudarc::driver::sys::cuDriverGetVersion(&mut driver_version)
+            .result()
+            .map_err(|error| {
+                RecoverError::BackendUnavailable(format!("CUDA driver identity: {error}"))
+            })?;
+    }
+    let uuid = uuid.bytes.map(|byte| byte as u8);
+    Ok(format!(
+        "CUDA {name} (UUID {}, compute {major}.{minor}, driver {driver_version})",
+        hex::encode(uuid),
+    ))
+}
+
 impl RecoveryBackend for CubeSeedDeriver {
     fn kind(&self) -> BackendKind {
         match self.kind {
@@ -203,24 +237,18 @@ impl RecoveryBackend for CubeSeedDeriver {
         Some(self.workgroup_size)
     }
 
-    fn configure(
-        &mut self,
-        batch_size: usize,
-        workgroup_size: Option<u32>,
-    ) -> Result<(), RecoverError> {
-        if batch_size == 0 {
+    fn configure(&mut self, configuration: BackendConfiguration) -> Result<(), RecoverError> {
+        let BackendConfiguration::Cube {
+            batch_size,
+            workgroup_size,
+        } = configuration
+        else {
             return Err(RecoverError::InvalidSetting(
-                "backend batch size must be greater than zero".into(),
+                "CubeCL backend requires an accelerator configuration".into(),
             ));
-        }
-        let workgroup_size = workgroup_size.unwrap_or(self.workgroup_size);
-        if !(32..=256).contains(&workgroup_size) || !workgroup_size.is_power_of_two() {
-            return Err(RecoverError::InvalidSetting(
-                "CubeCL workgroup size must be a power of two from 32 through 256".into(),
-            ));
-        }
-        self.batch_size = batch_size;
-        self.workgroup_size = workgroup_size;
+        };
+        self.batch_size = batch_size.get();
+        self.workgroup_size = workgroup_size.get();
         Ok(())
     }
 
@@ -282,12 +310,9 @@ impl RecoveryBackend for CubeSeedDeriver {
                 self.workgroup_size,
             )?,
             #[cfg(feature = "cuda")]
-            CubeRuntimeKind::Cuda => filter_chain_code_with_runtime::<cubecl::cuda::CudaRuntime>(
-                candidates,
-                self,
-                chain_code,
-                self.workgroup_size,
-            )?,
+            CubeRuntimeKind::Cuda => {
+                compact_chain_code_with_cuda(candidates, self, chain_code, self.workgroup_size)?
+            }
         };
         if possible.is_empty() {
             return Ok(Vec::new());
@@ -380,6 +405,7 @@ where
     Ok(SeedBatch::new(seeds))
 }
 
+#[cfg(any(feature = "cube-cpu", all(feature = "metal", target_os = "macos")))]
 fn filter_chain_code_with_runtime<R: Runtime>(
     candidates: &CandidateBatch,
     deriver: &CubeSeedDeriver,
@@ -448,6 +474,102 @@ where
     Ok(matches)
 }
 
+#[cfg(feature = "cuda")]
+fn compact_chain_code_with_cuda(
+    candidates: &CandidateBatch,
+    deriver: &CubeSeedDeriver,
+    chain_code: [u8; 32],
+    workgroup_size: u32,
+) -> Result<Vec<usize>, RecoverError> {
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let lengths = candidates
+        .lengths()
+        .iter()
+        .map(|length| u32::from(*length))
+        .collect::<Vec<_>>();
+    let expected = chain_code
+        .chunks_exact(8)
+        .map(|bytes| u64::from_be_bytes(bytes.try_into().expect("eight-byte chunk")))
+        .collect::<Vec<_>>();
+    let device = cubecl::cuda::CudaDevice::default();
+    let client = cubecl::cuda::CudaRuntime::client(&device);
+    let candidates_handle = client.create_from_slice(u8::as_bytes(candidates.bytes()));
+    let lengths_handle = client.create_from_slice(u32::as_bytes(&lengths));
+    let expected_handle = client.create_from_slice(u64::as_bytes(&expected));
+    let match_count_handle = client.create_from_slice(u32::as_bytes(&[0]));
+    let match_indices_handle = client.empty(candidates.len() * core::mem::size_of::<u32>());
+    let cube_count = CubeCount::Static(
+        candidates.len().div_ceil(workgroup_size as usize) as u32,
+        1,
+        1,
+    );
+
+    unsafe {
+        bip39_chain_code_compact_kernel::launch::<cubecl::cuda::CudaRuntime>(
+            &client,
+            cube_count,
+            CubeDim::new_1d(workgroup_size),
+            ArrayArg::from_raw_parts(candidates_handle, candidates.bytes().len()),
+            ArrayArg::from_raw_parts(lengths_handle, lengths.len()),
+            ArrayArg::from_raw_parts(deriver.inner_handle.clone(), deriver.inner_state.len()),
+            ArrayArg::from_raw_parts(deriver.outer_handle.clone(), deriver.outer_state.len()),
+            ArrayArg::from_raw_parts(
+                deriver.bip32_inner_handle.clone(),
+                deriver.bip32_inner_state.len(),
+            ),
+            ArrayArg::from_raw_parts(
+                deriver.bip32_outer_handle.clone(),
+                deriver.bip32_outer_state.len(),
+            ),
+            ArrayArg::from_raw_parts(expected_handle, expected.len()),
+            ArrayArg::from_raw_parts(match_count_handle.clone(), 1),
+            ArrayArg::from_raw_parts(match_indices_handle.clone(), candidates.len()),
+            candidates.stride(),
+        );
+    }
+
+    let match_count_bytes = client
+        .read_one(match_count_handle)
+        .map_err(|error| RecoverError::SeedDerivation(format!("CubeCL readback: {error:?}")))?;
+    let match_counts = u32::from_bytes(&match_count_bytes);
+    let &[match_count] = match_counts else {
+        return Err(RecoverError::SeedDerivation(format!(
+            "CubeCL returned {} match counters, expected 1",
+            match_counts.len()
+        )));
+    };
+    let match_count = match_count as usize;
+    if match_count > candidates.len() {
+        return Err(RecoverError::SeedDerivation(format!(
+            "CubeCL returned {match_count} possible matches for {} candidates",
+            candidates.len()
+        )));
+    }
+    if match_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let unread_bytes = (candidates.len() - match_count) * core::mem::size_of::<u32>();
+    let match_indices_handle = match_indices_handle.offset_end(unread_bytes as u64);
+    let match_indices_bytes = client
+        .read_one(match_indices_handle)
+        .map_err(|error| RecoverError::SeedDerivation(format!("CubeCL readback: {error:?}")))?;
+    let mut matches = u32::from_bytes(&match_indices_bytes)
+        .iter()
+        .map(|index| *index as usize)
+        .collect::<Vec<_>>();
+    if matches.len() != match_count || matches.iter().any(|index| *index >= candidates.len()) {
+        return Err(RecoverError::SeedDerivation(
+            "CubeCL returned invalid compacted match indices".into(),
+        ));
+    }
+    matches.sort_unstable();
+    Ok(matches)
+}
+
 #[cube(launch)]
 fn bip39_seed_kernel(
     candidates: &Array<u8>,
@@ -480,6 +602,7 @@ fn bip39_seed_kernel(
     }
 }
 
+#[cfg(any(feature = "cube-cpu", all(feature = "metal", target_os = "macos")))]
 #[cube(launch)]
 fn bip39_chain_code_kernel(
     candidates: &Array<u8>,
@@ -494,36 +617,94 @@ fn bip39_chain_code_kernel(
 ) {
     let candidate = ABSOLUTE_POS;
     if candidate < lengths.len() {
-        let constants = Array::from_data(SHA512_CONSTANTS);
-        let mut seed = Array::<u64>::new(8usize);
-        derive_bip39_seed(
+        matches[candidate] = chain_code_match(
             candidate,
             candidates,
             lengths,
             inner_initial,
             outer_initial,
-            &constants,
-            stride,
-            &mut seed,
-        );
-        let mut master = Array::<u64>::new(8usize);
-        hmac_sha512_64(
             bip32_inner_initial,
             bip32_outer_initial,
-            &seed,
-            &constants,
-            &mut master,
+            expected_chain_code,
+            stride,
         );
-        let mut matched = 1u32;
-        let mut index = 0usize;
-        while index < 4usize {
-            if master[index + 4usize] != expected_chain_code[index] {
-                matched = 0;
-            }
-            index += 1;
-        }
-        matches[candidate] = matched;
     }
+}
+
+#[cfg(feature = "cuda")]
+#[cube(launch)]
+fn bip39_chain_code_compact_kernel(
+    candidates: &Array<u8>,
+    lengths: &Array<u32>,
+    inner_initial: &Array<u64>,
+    outer_initial: &Array<u64>,
+    bip32_inner_initial: &Array<u64>,
+    bip32_outer_initial: &Array<u64>,
+    expected_chain_code: &Array<u64>,
+    match_count: &mut Array<Atomic<u32>>,
+    match_indices: &mut Array<u32>,
+    stride: usize,
+) {
+    let candidate = ABSOLUTE_POS;
+    if candidate < lengths.len()
+        && chain_code_match(
+            candidate,
+            candidates,
+            lengths,
+            inner_initial,
+            outer_initial,
+            bip32_inner_initial,
+            bip32_outer_initial,
+            expected_chain_code,
+            stride,
+        ) != 0
+    {
+        let output_index = usize::cast_from(match_count[0].fetch_add(1));
+        match_indices[output_index] = u32::cast_from(candidate);
+    }
+}
+
+#[cube]
+fn chain_code_match(
+    candidate: usize,
+    candidates: &Array<u8>,
+    lengths: &Array<u32>,
+    inner_initial: &Array<u64>,
+    outer_initial: &Array<u64>,
+    bip32_inner_initial: &Array<u64>,
+    bip32_outer_initial: &Array<u64>,
+    expected_chain_code: &Array<u64>,
+    stride: usize,
+) -> u32 {
+    let constants = Array::from_data(SHA512_CONSTANTS);
+    let mut seed = Array::<u64>::new(8usize);
+    derive_bip39_seed(
+        candidate,
+        candidates,
+        lengths,
+        inner_initial,
+        outer_initial,
+        &constants,
+        stride,
+        &mut seed,
+    );
+    let mut master = Array::<u64>::new(8usize);
+    hmac_sha512_64(
+        bip32_inner_initial,
+        bip32_outer_initial,
+        &seed,
+        &constants,
+        &mut master,
+    );
+    let mut matched = 1u32;
+    let mut index = 0usize;
+    while index < 4usize {
+        if master[index + 4usize] != expected_chain_code[index] {
+            matched = 0;
+        }
+        index += 1;
+    }
+    matched
 }
 
 #[cube]
@@ -865,11 +1046,14 @@ fn sha512_compress_host(state: &mut [u64; 8], block: &[u8; 128]) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cuda"))]
     use bip32::{Prefix, XPrv};
     use bip39::{Language, Mnemonic};
 
     use super::*;
-    use crate::domain::{Candidate, MasterXpubTarget, TargetFingerprint};
+    use crate::domain::Candidate;
+    #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cuda"))]
+    use crate::domain::{MasterXpubTarget, TargetFingerprint};
 
     const PUBLIC_TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
 
@@ -892,6 +1076,29 @@ mod tests {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     #[test]
     fn metal_filters_master_chain_code_and_confirms_public_key() {
+        assert_master_xpub_filter(CubeSeedDeriver::metal);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn cuda_matches_bip39_reference() {
+        let secret = SecretMnemonic::new(PUBLIC_TEST_MNEMONIC.to_owned());
+        let mut deriver = CubeSeedDeriver::cuda(&secret).unwrap();
+        assert_matches_reference(&mut deriver);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn cuda_compacts_master_chain_code_survivors_and_confirms_public_key() {
+        assert_master_xpub_filter(CubeSeedDeriver::cuda);
+    }
+
+    #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cuda"))]
+    fn assert_master_xpub_filter(
+        create_deriver: fn(&SecretMnemonic) -> Result<CubeSeedDeriver, RecoverError>,
+    ) {
         let secret = SecretMnemonic::new(PUBLIC_TEST_MNEMONIC.to_owned());
         let mnemonic = Mnemonic::parse_in(Language::English, PUBLIC_TEST_MNEMONIC).unwrap();
         let expected = XPrv::new(mnemonic.to_seed("BenefitWIFE")).unwrap();
@@ -914,12 +1121,16 @@ mod tests {
             ),
         ])
         .unwrap();
-        let mut deriver = CubeSeedDeriver::metal(&secret).unwrap();
+        let mut deriver = create_deriver(&secret).unwrap();
 
         assert_eq!(deriver.verify(&candidates, &target).unwrap(), [1]);
     }
 
-    #[cfg(any(feature = "cube-cpu", all(feature = "metal", target_os = "macos")))]
+    #[cfg(any(
+        feature = "cube-cpu",
+        all(feature = "metal", target_os = "macos"),
+        feature = "cuda"
+    ))]
     fn assert_matches_reference(deriver: &mut CubeSeedDeriver) {
         let candidates = vec![
             Candidate::new(

@@ -7,7 +7,10 @@ use sha2::Sha512;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{
-    domain::{BackendKind, CandidateBatch, SecretMnemonic, TargetFingerprint, VerificationTarget},
+    domain::{
+        BackendConfiguration, BackendKind, CandidateBatch, SecretMnemonic, TargetFingerprint,
+        VerificationTarget,
+    },
     error::RecoverError,
 };
 
@@ -35,6 +38,16 @@ pub trait RecoveryBackend {
     /// Human-readable runtime or device description
     fn device_name(&self) -> String;
 
+    /// Stable hardware identity used to bind selected benchmark configurations
+    fn hardware_signature(&self) -> String {
+        format!(
+            "{}; cpu={}; rayon-threads={}",
+            self.device_name(),
+            cpu_model_name(),
+            rayon::current_num_threads()
+        )
+    }
+
     /// Batch size suitable for this backend
     fn preferred_batch_size(&self) -> usize;
 
@@ -43,23 +56,12 @@ pub trait RecoveryBackend {
         None
     }
 
-    /// Apply a benchmark-selected batch and optional workgroup size
-    fn configure(
-        &mut self,
-        batch_size: usize,
-        workgroup_size: Option<u32>,
-    ) -> Result<(), RecoverError> {
-        if batch_size == 0 {
-            return Err(RecoverError::InvalidSetting(
-                "backend batch size must be greater than zero".into(),
-            ));
-        }
-        if workgroup_size.is_some() {
-            return Err(RecoverError::InvalidSetting(
-                "CPU backend does not accept a workgroup size".into(),
-            ));
-        }
-        Ok(())
+    /// Apply a validated benchmark-selected runtime configuration
+    fn configure(&mut self, configuration: BackendConfiguration) -> Result<(), RecoverError>;
+
+    /// CPU percentage assigned by an explicit hybrid backend
+    fn cpu_share_percent(&self) -> Option<u8> {
+        None
     }
 
     /// Derive one seed for every candidate in the input batch
@@ -74,6 +76,35 @@ pub trait RecoveryBackend {
         let seeds = self.derive_seeds(candidates)?;
         matching_candidate_indices_for_target(&seeds, target)
     }
+}
+
+fn cpu_model_name() -> String {
+    #[cfg(target_os = "linux")]
+    if let Ok(cpu_info) = std::fs::read_to_string("/proc/cpuinfo") {
+        if let Some(model) = cpu_info.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            let value = value.trim();
+            (matches!(key.trim(), "model name" | "Hardware" | "Processor") && !value.is_empty())
+                .then(|| value.to_owned())
+        }) {
+            return model;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    for key in ["machdep.cpu.brand_string", "hw.model"] {
+        if let Ok(output) = std::process::Command::new("sysctl")
+            .args(["-n", key])
+            .output()
+        {
+            let model = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if output.status.success() && !model.is_empty() {
+                return model;
+            }
+        }
+    }
+
+    std::env::consts::ARCH.to_owned()
 }
 
 /// Audited CPU seed derivation using the `bip39` crate and Rayon
@@ -107,22 +138,13 @@ impl RecoveryBackend for CpuSeedDeriver {
         self.batch_size
     }
 
-    fn configure(
-        &mut self,
-        batch_size: usize,
-        workgroup_size: Option<u32>,
-    ) -> Result<(), RecoverError> {
-        if batch_size == 0 {
+    fn configure(&mut self, configuration: BackendConfiguration) -> Result<(), RecoverError> {
+        let BackendConfiguration::Cpu { batch_size } = configuration else {
             return Err(RecoverError::InvalidSetting(
-                "backend batch size must be greater than zero".into(),
+                "CPU backend requires a CPU-only configuration".into(),
             ));
-        }
-        if workgroup_size.is_some() {
-            return Err(RecoverError::InvalidSetting(
-                "CPU backend does not accept a workgroup size".into(),
-            ));
-        }
-        self.batch_size = batch_size;
+        };
+        self.batch_size = batch_size.get();
         Ok(())
     }
 

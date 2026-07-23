@@ -12,15 +12,15 @@ pub mod cube_backend;
 pub mod domain;
 pub mod engine;
 pub mod error;
-#[cfg(all(feature = "metal", target_os = "macos"))]
+#[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cuda"))]
 pub mod hybrid_backend;
 pub mod input;
 pub mod search;
 pub mod state;
 
 pub use domain::{
-    BackendKind, CandidateBatch, CandidateCursor, MasterXpubTarget, OrderMode, RecoveryRecipe,
-    RecoverySettings, SearchPhase, SecretMnemonic, SpacingMode, TargetFingerprint, TokenSlot,
-    VerificationTarget, WrittenWords,
+    BackendConfiguration, BackendKind, BatchSize, CandidateBatch, CandidateCursor, CpuShare,
+    MasterXpubTarget, OrderMode, RecoveryRecipe, RecoverySettings, SearchPhase, SecretMnemonic,
+    SpacingMode, TargetFingerprint, TokenSlot, VerificationTarget, WorkgroupSize, WrittenWords,
 };
 pub use error::RecoverError;
