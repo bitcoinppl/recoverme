@@ -8,10 +8,10 @@ use pyo3::{create_exception, exceptions::PyException, prelude::*};
 use recoverme::{
     crypto::{matching_candidate_indices, SeedBatch},
     domain::{
-        Candidate, CandidateCursor, RecoverySettings, SearchPhase, TargetFingerprint,
-        DEFAULT_MAX_PASSPHRASE_BYTES,
+        Candidate, CandidateCursor, OrderMode, RecoverySettings, SearchPhase, SpacingMode,
+        TargetFingerprint, DEFAULT_MAX_PASSPHRASE_BYTES,
     },
-    input::{load_inputs, recovery_spec_hash, RecoveryInputs},
+    input::{load_inputs, load_inputs_with_recipe, recovery_spec_hash, RecoveryInputs},
     search::RecoveryPlan,
     state::{MatchRecord, MatchStatus, RecoveryState},
     RecoverError,
@@ -26,6 +26,17 @@ struct PendingBatch {
     token: u64,
     cursor: CandidateCursor,
     candidates: Vec<Candidate>,
+}
+
+struct PlanOptions<'a> {
+    fingerprint: &'a str,
+    state_dir: &'a str,
+    neighbors: usize,
+    max_replacements: usize,
+    lowercase_already_tried: bool,
+    order: OrderMode,
+    spacing: SpacingMode,
+    concatenated_already_tried: bool,
 }
 
 /// Fixed-width candidate buffers for one opaque recovery batch
@@ -108,8 +119,15 @@ impl RecoverySession {
         state_dir,
         neighbors=3,
         max_replacements=2,
-        lowercase_already_tried=false
+        lowercase_already_tried=false,
+        order="permuted",
+        spacing="concatenated",
+        concatenated_already_tried=false
     ))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the Python entry point exposes each recovery setting as a named argument"
+    )]
     fn plan(
         mnemonic_file: &str,
         words_file: &str,
@@ -118,27 +136,72 @@ impl RecoverySession {
         neighbors: usize,
         max_replacements: usize,
         lowercase_already_tried: bool,
+        order: &str,
+        spacing: &str,
+        concatenated_already_tried: bool,
     ) -> PyResult<Self> {
-        let fingerprint = TargetFingerprint::from_str(fingerprint).map_err(to_python_error)?;
         let inputs = load_inputs(Path::new(mnemonic_file), Path::new(words_file))
             .map_err(to_python_error)?;
-        let settings = RecoverySettings {
-            neighbors_per_word: neighbors,
-            max_replacements,
-            lowercase_already_tried,
-            ..RecoverySettings::default()
-        };
-        let plan = RecoveryPlan::compile(&inputs.written_words, settings.clone())
-            .map_err(to_python_error)?;
-        let state = RecoveryState::open_or_create(
-            Path::new(state_dir),
-            recovery_spec_hash(&inputs, fingerprint, &settings),
-            fingerprint,
-            settings,
-            plan.phase_summaries(),
+        Self::plan_inputs(
+            inputs,
+            PlanOptions {
+                fingerprint,
+                state_dir,
+                neighbors,
+                max_replacements,
+                lowercase_already_tried,
+                order: parse_order(order)?,
+                spacing: parse_spacing(spacing)?,
+                concatenated_already_tried,
+            },
         )
-        .map_err(to_python_error)?;
-        Ok(Self::new(plan, state, &inputs))
+    }
+
+    /// Create a session from an advanced recipe file
+    #[staticmethod]
+    #[pyo3(signature = (
+        mnemonic_file,
+        recipe_file,
+        fingerprint,
+        state_dir,
+        neighbors=3,
+        max_replacements=2,
+        lowercase_already_tried=false,
+        order="permuted",
+        spacing="concatenated",
+        concatenated_already_tried=false
+    ))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the Python entry point exposes each recovery setting as a named argument"
+    )]
+    fn plan_recipe(
+        mnemonic_file: &str,
+        recipe_file: &str,
+        fingerprint: &str,
+        state_dir: &str,
+        neighbors: usize,
+        max_replacements: usize,
+        lowercase_already_tried: bool,
+        order: &str,
+        spacing: &str,
+        concatenated_already_tried: bool,
+    ) -> PyResult<Self> {
+        let inputs = load_inputs_with_recipe(Path::new(mnemonic_file), Path::new(recipe_file))
+            .map_err(to_python_error)?;
+        Self::plan_inputs(
+            inputs,
+            PlanOptions {
+                fingerprint,
+                state_dir,
+                neighbors,
+                max_replacements,
+                lowercase_already_tried,
+                order: parse_order(order)?,
+                spacing: parse_spacing(spacing)?,
+                concatenated_already_tried,
+            },
+        )
     }
 
     /// Open an existing state after validating its owner-only secret files
@@ -149,7 +212,28 @@ impl RecoverySession {
         let manifest = existing.manifest().clone();
         let inputs = load_inputs(Path::new(mnemonic_file), Path::new(words_file))
             .map_err(to_python_error)?;
-        let plan = RecoveryPlan::compile(&inputs.written_words, manifest.settings.clone())
+        let plan = RecoveryPlan::compile_recipe(&inputs.recipe, manifest.settings.clone())
+            .map_err(to_python_error)?;
+        let state = RecoveryState::open_or_create(
+            Path::new(state_dir),
+            recovery_spec_hash(&inputs, manifest.target_fingerprint, &manifest.settings),
+            manifest.target_fingerprint,
+            manifest.settings,
+            plan.phase_summaries(),
+        )
+        .map_err(to_python_error)?;
+        Ok(Self::new(plan, state, &inputs))
+    }
+
+    /// Open an existing advanced-recipe session
+    #[staticmethod]
+    fn open_recipe(mnemonic_file: &str, recipe_file: &str, state_dir: &str) -> PyResult<Self> {
+        let existing =
+            RecoveryState::open_existing(Path::new(state_dir)).map_err(to_python_error)?;
+        let manifest = existing.manifest().clone();
+        let inputs = load_inputs_with_recipe(Path::new(mnemonic_file), Path::new(recipe_file))
+            .map_err(to_python_error)?;
+        let plan = RecoveryPlan::compile_recipe(&inputs.recipe, manifest.settings.clone())
             .map_err(to_python_error)?;
         let state = RecoveryState::open_or_create(
             Path::new(state_dir),
@@ -175,7 +259,7 @@ impl RecoverySession {
         Ok(Array1::from_vec(bytes).into_pyarray(py).unbind())
     }
 
-    /// Exact phase counts for the shared v2 plan
+    /// Exact phase counts for the shared v3 plan
     fn phase_summaries(&self) -> Vec<(String, u128)> {
         self.plan
             .phase_summaries()
@@ -203,7 +287,7 @@ impl RecoverySession {
     }
 
     /// Immutable settings defining the candidate space
-    fn settings(&self) -> (usize, usize, usize, usize, bool) {
+    fn settings(&self) -> (usize, usize, usize, usize, bool, String, String, bool) {
         let settings = self.plan.settings();
         (
             settings.neighbors_per_word,
@@ -211,6 +295,9 @@ impl RecoverySession {
             settings.local_swap_radius,
             settings.max_passphrase_bytes,
             settings.lowercase_already_tried,
+            settings.order.to_string(),
+            settings.spacing.to_string(),
+            settings.concatenated_already_tried,
         )
     }
 
@@ -402,6 +489,31 @@ impl RecoverySession {
 }
 
 impl RecoverySession {
+    fn plan_inputs(inputs: RecoveryInputs, options: PlanOptions<'_>) -> PyResult<Self> {
+        let fingerprint =
+            TargetFingerprint::from_str(options.fingerprint).map_err(to_python_error)?;
+        let settings = RecoverySettings {
+            neighbors_per_word: options.neighbors,
+            max_replacements: options.max_replacements,
+            lowercase_already_tried: options.lowercase_already_tried,
+            order: options.order,
+            spacing: options.spacing,
+            concatenated_already_tried: options.concatenated_already_tried,
+            ..RecoverySettings::default()
+        };
+        let plan = RecoveryPlan::compile_recipe(&inputs.recipe, settings.clone())
+            .map_err(to_python_error)?;
+        let state = RecoveryState::open_or_create(
+            Path::new(options.state_dir),
+            recovery_spec_hash(&inputs, fingerprint, &settings),
+            fingerprint,
+            settings,
+            plan.phase_summaries(),
+        )
+        .map_err(to_python_error)?;
+        Ok(Self::new(plan, state, &inputs))
+    }
+
     fn new(plan: RecoveryPlan, state: RecoveryState, inputs: &RecoveryInputs) -> Self {
         Self {
             plan,
@@ -411,6 +523,24 @@ impl RecoverySession {
             pending: None,
             next_token: 0,
         }
+    }
+}
+
+fn parse_order(value: &str) -> PyResult<OrderMode> {
+    match value {
+        "written" => Ok(OrderMode::Written),
+        "permuted" => Ok(OrderMode::Permuted),
+        _ => Err(RecoveryError::new_err("unknown order mode")),
+    }
+}
+
+fn parse_spacing(value: &str) -> PyResult<SpacingMode> {
+    match value {
+        "concatenated" => Ok(SpacingMode::Concatenated),
+        "between" => Ok(SpacingMode::Between),
+        "both" => Ok(SpacingMode::Both),
+        "coldcard" => Ok(SpacingMode::Coldcard),
+        _ => Err(RecoveryError::new_err("unknown spacing mode")),
     }
 }
 
@@ -470,15 +600,9 @@ fn seed_batch(seeds: &PyReadonlyArray2<'_, u8>, count: usize) -> PyResult<SeedBa
 }
 
 fn parse_phase(value: &str) -> PyResult<SearchPhase> {
-    match value {
-        "written-lower" => Ok(SearchPhase::WrittenLower),
-        "written-case" => Ok(SearchPhase::WrittenCase),
-        "neighbor-1-lower" => Ok(SearchPhase::Neighbor1Lower),
-        "neighbor-2-lower" => Ok(SearchPhase::Neighbor2Lower),
-        "neighbor-1-case" => Ok(SearchPhase::Neighbor1Case),
-        "neighbor-2-case" => Ok(SearchPhase::Neighbor2Case),
-        _ => Err(RecoveryError::new_err("unknown recovery phase")),
-    }
+    value
+        .parse()
+        .map_err(|_| RecoveryError::new_err("unknown recovery phase"))
 }
 
 fn to_python_error(error: RecoverError) -> PyErr {

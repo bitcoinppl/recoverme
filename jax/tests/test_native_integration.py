@@ -43,7 +43,7 @@ def _plan(
 def _candidate_id(passphrase: str) -> str:
     digest = hashlib.sha256()
     digest.update(b"recoverme-candidate\0")
-    digest.update((2).to_bytes(4, "little"))
+    digest.update((3).to_bytes(4, "little"))
     digest.update(passphrase.encode())
     return digest.hexdigest()
 
@@ -88,6 +88,49 @@ def test_lowercase_already_tried_removes_every_lowercase_phase(
 
     assert session.phase_summaries() == [("written-case", 16)]
     assert [record[2] for record in records] == ["AlphaBrisk", "ALPHABRISK"]
+
+
+def test_recipe_and_coldcard_spacing_match_the_rust_candidate_model(
+    secret_files: tuple[Path, Path], tmp_path: Path
+) -> None:
+    mnemonic_file, _words_file = secret_files
+    recipe_file = tmp_path / "recipe.toml"
+    recipe_file.write_text(
+        'version = 1\n\n[[slots]]\nalternatives = ["alpha", "alps"]\n\n'
+        '[[slots]]\nalternatives = ["brisk"]\noptional = true\n'
+    )
+    recipe_file.chmod(0o600)
+    session = _native.RecoverySession.plan_recipe(
+        str(mnemonic_file),
+        str(recipe_file),
+        "ffffffff",
+        str(tmp_path / "recipe-state"),
+        3,
+        0,
+        False,
+        "written",
+        "coldcard",
+        False,
+    )
+
+    records, _cursor = session.enumerate_candidates("written-lower", 100)
+    passphrases = {record[2] for record in records}
+
+    assert session.settings()[5:] == ("written", "coldcard", False)
+    assert passphrases == {
+        "alphabrisk",
+        "alpha brisk",
+        " alphabrisk",
+        " alpha brisk",
+        "alpsbrisk",
+        "alps brisk",
+        " alpsbrisk",
+        " alps brisk",
+        "alpha",
+        " alpha",
+        "alps",
+        " alps",
+    }
 
 
 def test_prepared_batch_is_not_checkpointed_until_fingerprints_complete(

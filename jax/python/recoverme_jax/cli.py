@@ -20,15 +20,6 @@ from recoverme_jax.runtime import run as run_recovery
 if TYPE_CHECKING:
     import jax
 
-_PHASES = (
-    "written-lower",
-    "written-case",
-    "neighbor-1-lower",
-    "neighbor-2-lower",
-    "neighbor-1-case",
-    "neighbor-2-case",
-)
-
 
 def main() -> None:
     """Parse arguments, execute one command, and return a process exit status."""
@@ -59,6 +50,13 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument("--neighbors", type=int, default=3)
     plan.add_argument("--max-replacements", type=int, default=2)
     plan.add_argument("--lowercase-already-tried", action="store_true")
+    plan.add_argument("--order", choices=("written", "permuted"), default="permuted")
+    plan.add_argument(
+        "--spacing",
+        choices=("concatenated", "between", "both", "coldcard"),
+        default="concatenated",
+    )
+    plan.add_argument("--concatenated-already-tried", action="store_true")
     plan.set_defaults(handler=_plan)
 
     measure = commands.add_parser("benchmark", help="benchmark JAX recovery backends")
@@ -71,7 +69,7 @@ def _parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run", help="run or resume through an explicit phase")
     _secret_files(run)
     run.add_argument("--state-dir", type=Path, required=True)
-    run.add_argument("--through", choices=_PHASES, required=True)
+    run.add_argument("--through", required=True)
     _device_options(run)
     run.add_argument("--batch-size", type=int)
     run.add_argument("--yes", action="store_true")
@@ -86,7 +84,9 @@ def _parser() -> argparse.ArgumentParser:
 
 def _secret_files(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mnemonic-file", type=Path, required=True)
-    parser.add_argument("--words-file", type=Path, required=True)
+    recipes = parser.add_mutually_exclusive_group(required=True)
+    recipes.add_argument("--words-file", type=Path)
+    recipes.add_argument("--recipe-file", type=Path)
 
 
 def _device_options(parser: argparse.ArgumentParser) -> None:
@@ -95,14 +95,23 @@ def _device_options(parser: argparse.ArgumentParser) -> None:
 
 
 def _plan(arguments: argparse.Namespace) -> None:
-    session = _native.RecoverySession.plan(
+    planner = (
+        _native.RecoverySession.plan_recipe
+        if arguments.recipe_file is not None
+        else _native.RecoverySession.plan
+    )
+    input_file = arguments.recipe_file or arguments.words_file
+    session = planner(
         str(arguments.mnemonic_file),
-        str(arguments.words_file),
+        str(input_file),
         arguments.fingerprint,
         str(arguments.state_dir),
         arguments.neighbors,
         arguments.max_replacements,
         arguments.lowercase_already_tried,
+        arguments.order,
+        arguments.spacing,
+        arguments.concatenated_already_tried,
     )
     print("Nearest BIP39 words:")
     for written, raw_neighbors in session.neighbor_suggestions():
@@ -118,11 +127,7 @@ def _plan(arguments: argparse.Namespace) -> None:
 
 
 def _benchmark(arguments: argparse.Namespace) -> None:
-    session = _native.RecoverySession.open(
-        str(arguments.mnemonic_file),
-        str(arguments.words_file),
-        str(arguments.state_dir),
-    )
+    session = _open_session(arguments)
     mnemonic = np.asarray(session.take_mnemonic_bytes(), dtype=np.uint8)
     store = BenchmarkStore(arguments.state_dir)
     try:
@@ -137,11 +142,7 @@ def _benchmark(arguments: argparse.Namespace) -> None:
 
 
 def _run(arguments: argparse.Namespace) -> None:
-    session = _native.RecoverySession.open(
-        str(arguments.mnemonic_file),
-        str(arguments.words_file),
-        str(arguments.state_dir),
-    )
+    session = _open_session(arguments)
     if session.has_pending_matches():
         raise _native.RecoveryError(
             "pending XFP matches must be verified or rejected before resuming"
@@ -190,6 +191,16 @@ def _run(arguments: argparse.Namespace) -> None:
 def _reject(arguments: argparse.Namespace) -> None:
     _native.reject_match(str(arguments.state_dir), arguments.match_id)
     print(f"Rejected XFP collision {arguments.match_id}; the next run will resume")
+
+
+def _open_session(arguments: argparse.Namespace) -> _native.RecoverySession:
+    opener = (
+        _native.RecoverySession.open_recipe
+        if arguments.recipe_file is not None
+        else _native.RecoverySession.open
+    )
+    input_file = arguments.recipe_file or arguments.words_file
+    return opener(str(arguments.mnemonic_file), str(input_file), str(arguments.state_dir))
 
 
 def _select_for_run(
@@ -246,8 +257,12 @@ def _print_benchmark(result: BenchmarkResult) -> None:
 
 
 def _count_through(summaries: list[tuple[str, int]], through: str) -> int:
-    authorized = _PHASES.index(through)
-    return sum(count for phase, count in summaries if _PHASES.index(phase) <= authorized)
+    total = 0
+    for phase, count in summaries:
+        total += count
+        if phase == through:
+            return total
+    raise ValueError(f"phase is not enabled in this recovery plan: {through}")
 
 
 def _confirm(prompt: str) -> bool:
