@@ -2,7 +2,7 @@
 
 `recoverme` is an offline BIP39 passphrase recovery tool. It searches
 deterministically across written words, capitalization, ordering, spacing, and
-nearby BIP39 words. Owner-only state files let interrupted searches resume.
+nearby BIP39 words. It can resume interrupted searches.
 
 > This software cannot guarantee recovery. Work on an offline computer, never
 > put a real mnemonic or passphrase in source control, and always verify a
