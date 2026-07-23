@@ -1,6 +1,7 @@
 //! Deterministic, resumable Coldcard BIP39 passphrase recovery
 
 pub mod backend;
+pub mod config;
 pub mod crypto;
 #[cfg(any(
     feature = "cube-cpu",
@@ -18,7 +19,8 @@ pub mod search;
 pub mod state;
 
 pub use domain::{
-    BackendKind, CandidateBatch, CandidateCursor, MasterXpubTarget, RecoverySettings, SearchPhase,
-    SecretMnemonic, TargetFingerprint, VerificationTarget, WrittenWords,
+    BackendKind, CandidateBatch, CandidateCursor, MasterXpubTarget, OrderMode, RecoveryRecipe,
+    RecoverySettings, SearchPhase, SecretMnemonic, SpacingMode, TargetFingerprint, TokenSlot,
+    VerificationTarget, WrittenWords,
 };
 pub use error::RecoverError;

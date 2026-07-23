@@ -4,14 +4,14 @@ use bip39::{Language, Mnemonic};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-const SEED_ENVIRONMENT_VARIABLE: &str = "SEED";
-const PASSPHRASE_ENVIRONMENT_VARIABLE: &str = "PASSPHRASE";
-const XFP_ENVIRONMENT_VARIABLE: &str = "XFP";
+const SEED_ENVIRONMENT_VARIABLE: &str = "RECOVERME_MNEMONIC";
+const PASSPHRASE_ENVIRONMENT_VARIABLE: &str = "RECOVERME_WORDS";
+const XFP_ENVIRONMENT_VARIABLE: &str = "RECOVERME_FINGERPRINT";
 
 use crate::{
     domain::{
-        MasterXpubTarget, RecoverySettings, SecretMnemonic, TargetFingerprint, VerificationTarget,
-        WrittenWords,
+        MasterXpubTarget, RecoveryRecipe, RecoverySettings, SecretMnemonic, TargetFingerprint,
+        TokenSlot, VerificationTarget, WrittenWords,
     },
     error::RecoverError,
 };
@@ -23,6 +23,8 @@ pub struct RecoveryInputs {
     pub mnemonic: SecretMnemonic,
     /// Normalized passphrase words in written order
     pub written_words: WrittenWords,
+    /// Typed recipe used by the candidate planner
+    pub recipe: RecoveryRecipe,
 }
 
 /// Read and validate the protected mnemonic and written-word files
@@ -43,7 +45,7 @@ pub fn load_inputs(
     parse_inputs(&mnemonic_text, words)
 }
 
-/// Read and validate `SEED` and whitespace-separated `PASSPHRASE` values
+/// Read and validate the scoped mnemonic and whitespace-separated words variables
 pub fn load_inputs_from_env() -> Result<RecoveryInputs, RecoverError> {
     let mnemonic_text = read_environment(SEED_ENVIRONMENT_VARIABLE)?;
     let words_text = read_environment(PASSPHRASE_ENVIRONMENT_VARIABLE)?;
@@ -54,7 +56,7 @@ pub fn load_inputs_from_env() -> Result<RecoveryInputs, RecoverError> {
     parse_inputs(&mnemonic_text, words)
 }
 
-/// Read and validate the target fingerprint from `XFP`
+/// Read and validate the scoped target fingerprint variable
 pub fn load_target_fingerprint_from_env() -> Result<TargetFingerprint, RecoverError> {
     read_environment(XFP_ENVIRONMENT_VARIABLE)?.parse()
 }
@@ -69,9 +71,68 @@ fn parse_inputs<'a>(
         .map(|(line, word)| normalize_written_word(line, word))
         .collect::<Result<Vec<_>, _>>()?;
 
+    let written_words = WrittenWords::new(words)?;
+    let recipe = RecoveryRecipe::from_written_words(&written_words);
     Ok(RecoveryInputs {
         mnemonic: SecretMnemonic::new(mnemonic.to_string()),
-        written_words: WrittenWords::new(words)?,
+        written_words,
+        recipe,
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct RecipeDocument {
+    version: u32,
+    slots: Vec<RecipeSlotDocument>,
+}
+
+#[derive(serde::Deserialize)]
+struct RecipeSlotDocument {
+    alternatives: Vec<String>,
+    #[serde(default)]
+    optional: bool,
+}
+
+/// Read an owner-only advanced recipe file
+pub fn load_recipe(path: &Path) -> Result<RecoveryRecipe, RecoverError> {
+    check_secret_file(path)?;
+    let text = Zeroizing::new(read_secret(path)?);
+    let document: RecipeDocument = toml::from_str(&text)
+        .map_err(|error| RecoverError::InvalidSetting(format!("invalid recipe file: {error}")))?;
+    if document.version != 1 {
+        return Err(RecoverError::InvalidSetting(format!(
+            "unsupported recipe version {}",
+            document.version
+        )));
+    }
+    RecoveryRecipe::new(
+        document
+            .slots
+            .into_iter()
+            .map(|slot| TokenSlot::new(slot.alternatives, slot.optional))
+            .collect::<Result<Vec<_>, _>>()?,
+    )
+}
+
+/// Read a mnemonic and advanced recipe from protected files
+pub fn load_inputs_with_recipe(
+    mnemonic_path: &Path,
+    recipe_path: &Path,
+) -> Result<RecoveryInputs, RecoverError> {
+    check_secret_file(mnemonic_path)?;
+    let mnemonic_text = Zeroizing::new(read_secret(mnemonic_path)?);
+    let mnemonic = Mnemonic::parse_in(Language::English, mnemonic_text.trim())
+        .map_err(|error| RecoverError::InvalidMnemonic(error.to_string()))?;
+    let recipe = load_recipe(recipe_path)?;
+    let primary_words = recipe
+        .slots()
+        .iter()
+        .map(|slot| slot.alternatives()[0].clone())
+        .collect();
+    Ok(RecoveryInputs {
+        mnemonic: SecretMnemonic::new(mnemonic.to_string()),
+        written_words: WrittenWords::new(primary_words)?,
+        recipe,
     })
 }
 
@@ -101,12 +162,16 @@ pub fn recovery_spec_hash_for_target(
     settings: &RecoverySettings,
 ) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"recoverme-spec-v3\0");
+    digest.update(b"recoverme-spec-v4\0");
     digest.update(inputs.mnemonic.expose().as_bytes());
     digest.update([0]);
-    for word in inputs.written_words.as_slice() {
-        digest.update(word.as_bytes());
-        digest.update([0]);
+    for slot in inputs.recipe.slots() {
+        digest.update([u8::from(slot.is_optional())]);
+        for alternative in slot.alternatives() {
+            digest.update(alternative.as_bytes());
+            digest.update([0]);
+        }
+        digest.update([0xff]);
     }
     digest.update(target.fingerprint().bytes());
     if let Some(master_xpub) = target.master_xpub() {
@@ -121,6 +186,9 @@ pub fn recovery_spec_hash_for_target(
     digest.update(settings.local_swap_radius.to_le_bytes());
     digest.update(settings.max_passphrase_bytes.to_le_bytes());
     digest.update([u8::from(settings.lowercase_already_tried)]);
+    digest.update([settings.order as u8]);
+    digest.update([settings.spacing as u8]);
+    digest.update([u8::from(settings.concatenated_already_tried)]);
     hex::encode(digest.finalize())
 }
 

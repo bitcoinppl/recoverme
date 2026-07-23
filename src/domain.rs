@@ -1,4 +1,4 @@
-use std::{fmt, str::FromStr, sync::OnceLock};
+use std::{collections::HashSet, fmt, str::FromStr, sync::OnceLock};
 
 use bip32::XPub;
 use clap::ValueEnum;
@@ -9,7 +9,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 use crate::error::RecoverError;
 
 /// Version of the candidate ordering and checkpoint format
-pub const ALGORITHM_VERSION: u32 = 2;
+pub const ALGORITHM_VERSION: u32 = 3;
 
 /// Maximum passphrase length accepted by Coldcard
 pub const DEFAULT_MAX_PASSPHRASE_BYTES: usize = 100;
@@ -27,6 +27,12 @@ pub struct RecoverySettings {
     pub max_passphrase_bytes: usize,
     /// Whether lowercase-only phases were completed by an earlier search
     pub lowercase_already_tried: bool,
+    /// Candidate token ordering strategy
+    pub order: OrderMode,
+    /// Spaces inserted before candidate tokens
+    pub spacing: SpacingMode,
+    /// Whether the all-concatenated spacing pattern was already exhausted
+    pub concatenated_already_tried: bool,
 }
 
 impl Default for RecoverySettings {
@@ -37,72 +43,118 @@ impl Default for RecoverySettings {
             local_swap_radius: 3,
             max_passphrase_bytes: DEFAULT_MAX_PASSPHRASE_BYTES,
             lowercase_already_tried: false,
+            order: OrderMode::Permuted,
+            spacing: SpacingMode::Concatenated,
+            concatenated_already_tried: false,
         }
     }
 }
 
-/// Ordered recovery phases, from most likely to largest search space
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ValueEnum,
-)]
+/// Candidate token ordering strategy
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
+pub enum OrderMode {
+    /// Keep surviving recipe slots in their written order
+    Written,
+    /// Rank nearby swaps first, then exhaust every unique permutation
+    Permuted,
+}
+
+/// Candidate spacing strategy
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum SpacingMode {
+    /// Concatenate every token
+    Concatenated,
+    /// Insert one space between every token
+    Between,
+    /// Try concatenated and conventionally spaced candidates
+    Both,
+    /// Try every Coldcard Add Word leading-space combination
+    Coldcard,
+}
+
+impl fmt::Display for OrderMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Written => "written",
+            Self::Permuted => "permuted",
+        })
+    }
+}
+
+impl fmt::Display for SpacingMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Concatenated => "concatenated",
+            Self::Between => "between",
+            Self::Both => "both",
+            Self::Coldcard => "coldcard",
+        })
+    }
+}
+
+/// Ordered recovery phases, from most likely to largest search space
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub enum SearchPhase {
     /// Written words, lowercase, in every unique order
     WrittenLower,
     /// Written words with lowercase, Title, and UPPER variants
     WrittenCase,
-    /// One nearest-word substitution, lowercase
-    #[serde(rename = "neighbor-1-lower")]
-    #[value(name = "neighbor-1-lower")]
-    Neighbor1Lower,
-    /// Two nearest-word substitutions, lowercase
-    #[serde(rename = "neighbor-2-lower")]
-    #[value(name = "neighbor-2-lower")]
-    Neighbor2Lower,
-    /// One nearest-word substitution with capitalization variants
-    #[serde(rename = "neighbor-1-case")]
-    #[value(name = "neighbor-1-case")]
-    Neighbor1Case,
-    /// Two nearest-word substitutions with capitalization variants
-    #[serde(rename = "neighbor-2-case")]
-    #[value(name = "neighbor-2-case")]
-    Neighbor2Case,
+    /// A fixed number of nearest-word substitutions, lowercase
+    NeighborLower(usize),
+    /// A fixed number of nearest-word substitutions with capitalization variants
+    NeighborCase(usize),
 }
 
 impl SearchPhase {
-    /// All phases in execution order
-    pub const ALL: [Self; 6] = [
-        Self::WrittenLower,
-        Self::WrittenCase,
-        Self::Neighbor1Lower,
-        Self::Neighbor2Lower,
-        Self::Neighbor1Case,
-        Self::Neighbor2Case,
-    ];
-
     /// Number of substitutions represented by this phase
     pub const fn replacement_count(self) -> usize {
         match self {
             Self::WrittenLower | Self::WrittenCase => 0,
-            Self::Neighbor1Lower | Self::Neighbor1Case => 1,
-            Self::Neighbor2Lower | Self::Neighbor2Case => 2,
+            Self::NeighborLower(count) | Self::NeighborCase(count) => count,
         }
     }
 
     /// Whether this phase enumerates capitalization variants
     pub const fn includes_case_variants(self) -> bool {
-        matches!(
-            self,
-            Self::WrittenCase | Self::Neighbor1Case | Self::Neighbor2Case
-        )
+        matches!(self, Self::WrittenCase | Self::NeighborCase(_))
     }
 
-    /// Position of this phase in the global execution order
-    pub fn index(self) -> usize {
-        Self::ALL
-            .iter()
-            .position(|phase| *phase == self)
-            .expect("all search phases are listed")
+    /// Position of this phase in a plan with the given substitution limit
+    pub const fn index(self, max_replacements: usize) -> usize {
+        match self {
+            Self::WrittenLower => 0,
+            Self::WrittenCase => 1,
+            Self::NeighborLower(count) => 1 + count,
+            Self::NeighborCase(count) => 1 + max_replacements + count,
+        }
+    }
+
+    /// Next phase in a plan with the given substitution limit
+    pub const fn next(self, max_replacements: usize) -> Option<Self> {
+        match self {
+            Self::WrittenLower => Some(Self::WrittenCase),
+            Self::WrittenCase if max_replacements > 0 => Some(Self::NeighborLower(1)),
+            Self::WrittenCase => None,
+            Self::NeighborLower(count) if count < max_replacements => {
+                Some(Self::NeighborLower(count + 1))
+            }
+            Self::NeighborLower(_) => Some(Self::NeighborCase(1)),
+            Self::NeighborCase(count) if count < max_replacements => {
+                Some(Self::NeighborCase(count + 1))
+            }
+            Self::NeighborCase(_) => None,
+        }
+    }
+
+    /// All phases for a substitution limit in execution order
+    pub fn all(max_replacements: usize) -> Vec<Self> {
+        let mut phases = vec![Self::WrittenLower, Self::WrittenCase];
+        phases.extend((1..=max_replacements).map(Self::NeighborLower));
+        phases.extend((1..=max_replacements).map(Self::NeighborCase));
+        phases
     }
 }
 
@@ -111,12 +163,58 @@ impl fmt::Display for SearchPhase {
         let value = match self {
             Self::WrittenLower => "written-lower",
             Self::WrittenCase => "written-case",
-            Self::Neighbor1Lower => "neighbor-1-lower",
-            Self::Neighbor2Lower => "neighbor-2-lower",
-            Self::Neighbor1Case => "neighbor-1-case",
-            Self::Neighbor2Case => "neighbor-2-case",
+            Self::NeighborLower(count) => return write!(formatter, "neighbor-{count}-lower"),
+            Self::NeighborCase(count) => return write!(formatter, "neighbor-{count}-case"),
         };
         formatter.write_str(value)
+    }
+}
+
+impl FromStr for SearchPhase {
+    type Err = RecoverError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "written-lower" => return Ok(Self::WrittenLower),
+            "written-case" => return Ok(Self::WrittenCase),
+            _ => {}
+        }
+        let (count, variants) = value
+            .strip_prefix("neighbor-")
+            .and_then(|suffix| {
+                suffix
+                    .strip_suffix("-lower")
+                    .map(|count| (count, false))
+                    .or_else(|| suffix.strip_suffix("-case").map(|count| (count, true)))
+            })
+            .ok_or_else(|| RecoverError::InvalidSetting("invalid search phase".into()))?;
+        let count = count
+            .parse::<usize>()
+            .map_err(|_| RecoverError::InvalidSetting("invalid search phase".into()))?;
+        if count == 0 {
+            return Err(RecoverError::InvalidSetting(
+                "neighbor phase count must be positive".into(),
+            ));
+        }
+        Ok(if variants {
+            Self::NeighborCase(count)
+        } else {
+            Self::NeighborLower(count)
+        })
+    }
+}
+
+impl From<SearchPhase> for String {
+    fn from(phase: SearchPhase) -> Self {
+        phase.to_string()
+    }
+}
+
+impl TryFrom<String> for SearchPhase {
+    type Error = RecoverError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
     }
 }
 
@@ -335,6 +433,89 @@ impl WrittenWords {
     }
 }
 
+/// One position in an advanced recovery recipe
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenSlot {
+    alternatives: Vec<String>,
+    optional: bool,
+}
+
+impl TokenSlot {
+    /// Construct a slot from ranked normalized alternatives
+    pub fn new(alternatives: Vec<String>, optional: bool) -> Result<Self, RecoverError> {
+        if alternatives.is_empty() {
+            return Err(RecoverError::InvalidSetting(
+                "recipe slots require at least one alternative".into(),
+            ));
+        }
+        if alternatives
+            .iter()
+            .any(|value| value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_alphabetic()))
+        {
+            return Err(RecoverError::InvalidSetting(
+                "recipe alternatives must contain ASCII letters only".into(),
+            ));
+        }
+        let normalized = alternatives
+            .into_iter()
+            .map(|value| value.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        let mut seen = HashSet::new();
+        if normalized.iter().any(|value| !seen.insert(value.clone())) {
+            return Err(RecoverError::InvalidSetting(
+                "recipe alternatives must be unique within a slot".into(),
+            ));
+        }
+        Ok(Self {
+            alternatives: normalized,
+            optional,
+        })
+    }
+
+    /// Ranked alternatives, with the written value first
+    pub fn alternatives(&self) -> &[String] {
+        &self.alternatives
+    }
+
+    /// Whether this slot may be omitted
+    pub const fn is_optional(&self) -> bool {
+        self.optional
+    }
+}
+
+/// Typed passphrase recovery recipe
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryRecipe(Vec<TokenSlot>);
+
+impl RecoveryRecipe {
+    /// Construct a nonempty recipe
+    pub fn new(slots: Vec<TokenSlot>) -> Result<Self, RecoverError> {
+        if slots.is_empty() {
+            return Err(RecoverError::NoWrittenWords);
+        }
+        Ok(Self(slots))
+    }
+
+    /// Construct required singleton slots from a simple words file
+    pub fn from_written_words(words: &WrittenWords) -> Self {
+        Self(
+            words
+                .as_slice()
+                .iter()
+                .map(|word| TokenSlot {
+                    alternatives: vec![word.clone()],
+                    optional: false,
+                })
+                .collect(),
+        )
+    }
+
+    /// Ordered recipe slots
+    pub fn slots(&self) -> &[TokenSlot] {
+        &self.0
+    }
+}
+
 /// Stable identifier for exact passphrase bytes supplied to BIP39
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CandidateId(pub String);
@@ -466,8 +647,11 @@ impl Candidate {
         &self.words
     }
 
-    pub(crate) fn from_words(phase: SearchPhase, words: Vec<String>) -> Self {
-        let passphrase = words.concat();
+    pub(crate) fn from_passphrase(
+        phase: SearchPhase,
+        passphrase: String,
+        words: Vec<String>,
+    ) -> Self {
         Self {
             id: OnceLock::new(),
             phase,
@@ -518,6 +702,9 @@ pub struct CandidateCursor {
     /// Case-pattern rank within the current permutation
     #[serde(with = "u128_string")]
     pub case_rank: u128,
+    /// Spacing-pattern rank for the current transformed permutation
+    #[serde(with = "u128_string")]
+    pub spacing_rank: u128,
     /// Number of verified candidates across all phases
     #[serde(with = "u128_string")]
     pub completed: u128,
@@ -530,6 +717,7 @@ impl Default for CandidateCursor {
             base_index: 0,
             permutation: PermutationCursor::default(),
             case_rank: 0,
+            spacing_rank: 0,
             completed: 0,
         }
     }

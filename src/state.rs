@@ -17,7 +17,7 @@ use crate::{
 
 const MANIFEST_FILE: &str = "manifest.json";
 const RUNTIME_FILE: &str = "runtime.json";
-const STATE_FORMAT_VERSION: u32 = 1;
+const STATE_FORMAT_VERSION: u32 = 2;
 
 /// Immutable recovery metadata stored without plaintext secrets
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -513,7 +513,7 @@ mod tests {
         let _state = state(directory.path());
         let manifest_path = directory.path().join(MANIFEST_FILE);
         let mut manifest = fs::read_to_string(&manifest_path).unwrap();
-        manifest = manifest.replace("  \"state_format_version\": 1,\n", "");
+        manifest = manifest.replace("  \"state_format_version\": 2,\n", "");
         fs::write(&manifest_path, manifest).unwrap();
 
         assert!(matches!(

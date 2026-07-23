@@ -242,10 +242,7 @@ mod tests {
         );
         assert_eq!(
             hex::encode(
-                fingerprint_for_passphrase(
-                    &mnemonic,
-                    "alphabriskcactusdaringeagerfabricgadget",
-                )
+                fingerprint_for_passphrase(&mnemonic, "alphabriskcactusdaringeagerfabricgadget",)
                     .unwrap()
             ),
             "997f3522"

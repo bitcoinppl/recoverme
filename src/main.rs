@@ -9,11 +9,14 @@ use clap::{Args, Parser, Subcommand};
 use color_eyre::eyre::{Result, WrapErr};
 use recoverme::{
     backend::{available_backends, resolve_backend},
-    domain::{BackendKind, RecoverySettings, SearchPhase, TargetFingerprint, VerificationTarget},
+    domain::{
+        BackendKind, OrderMode, RecoverySettings, SearchPhase, SpacingMode, TargetFingerprint,
+        VerificationTarget,
+    },
     engine::{benchmark_backend, benchmark_backend_with_config, run_recovery, RunOutcome},
     input::{
-        load_inputs, load_inputs_from_env, load_master_xpub, load_target_fingerprint_from_env,
-        recovery_spec_hash_for_target, RecoveryInputs,
+        load_inputs, load_inputs_from_env, load_inputs_with_recipe, load_master_xpub,
+        load_target_fingerprint_from_env, recovery_spec_hash_for_target, RecoveryInputs,
     },
     search::{expected_xfp_collisions, xfp_collision_probability, RecoveryPlan},
     state::{MatchStatus, RecoveryState},
@@ -22,6 +25,9 @@ use recoverme::{
 #[derive(Debug, Parser)]
 #[command(author, version, about, arg_required_else_help = true)]
 struct Cli {
+    /// Owner-only TOML file providing command defaults
+    #[arg(long, global = true, env = "RECOVERME_CONFIG")]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -37,7 +43,7 @@ enum Command {
     /// Reject a pending match after manual Coldcard verification
     RejectMatch {
         /// Durable recovery state directory
-        #[arg(long)]
+        #[arg(long, env = "RECOVERME_STATE_DIR")]
         state_dir: PathBuf,
         /// Candidate identifier printed when the match was found
         #[arg(long)]
@@ -47,20 +53,27 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct SecretInputs {
-    /// Owner-only mnemonic file; omit both file flags to use `SEED` and `PASSPHRASE`
-    #[arg(long, requires = "words_file")]
+    /// Owner-only mnemonic file; omit file flags to use scoped environment inputs
+    #[arg(long, env = "RECOVERME_MNEMONIC_FILE")]
     mnemonic_file: Option<PathBuf>,
     /// Owner-only written-words file; omit both file flags to use the environment
-    #[arg(long, requires = "mnemonic_file")]
+    #[arg(long, env = "RECOVERME_WORDS_FILE", conflicts_with = "recipe_file")]
     words_file: Option<PathBuf>,
+    /// Owner-only advanced recovery recipe file
+    #[arg(long, env = "RECOVERME_RECIPE_FILE", conflicts_with = "words_file")]
+    recipe_file: Option<PathBuf>,
 }
 
 impl SecretInputs {
     fn load(&self) -> Result<RecoveryInputs> {
-        match (&self.mnemonic_file, &self.words_file) {
-            (Some(mnemonic), Some(words)) => Ok(load_inputs(mnemonic, words)?),
-            (None, None) => Ok(load_inputs_from_env()?),
-            _ => unreachable!("clap requires secret file arguments together"),
+        match (&self.mnemonic_file, &self.words_file, &self.recipe_file) {
+            (Some(mnemonic), Some(words), None) => Ok(load_inputs(mnemonic, words)?),
+            (Some(mnemonic), None, Some(recipe)) => Ok(load_inputs_with_recipe(mnemonic, recipe)?),
+            (None, None, None) => Ok(load_inputs_from_env()?),
+            _ => Err(recoverme::error::RecoverError::InvalidSetting(
+                "mnemonic-file must be paired with words-file or recipe-file".into(),
+            )
+            .into()),
         }
     }
 }
@@ -70,23 +83,32 @@ struct PlanArgs {
     #[command(flatten)]
     secrets: SecretInputs,
     /// Target XFP; omit to read `XFP` from the environment
-    #[arg(long)]
+    #[arg(long, env = "RECOVERME_FINGERPRINT")]
     fingerprint: Option<TargetFingerprint>,
     /// Owner-only file containing the depth-zero master extended public key
-    #[arg(long)]
+    #[arg(long, env = "RECOVERME_MASTER_XPUB_FILE")]
     master_xpub_file: Option<PathBuf>,
     /// Durable recovery state directory
-    #[arg(long)]
+    #[arg(long, env = "RECOVERME_STATE_DIR")]
     state_dir: PathBuf,
     /// BIP39 neighbors retained for each written word
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, env = "RECOVERME_NEIGHBORS", default_value_t = 3)]
     neighbors: usize,
     /// Maximum number of nearest-word substitutions
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, env = "RECOVERME_MAX_REPLACEMENTS", default_value_t = 2)]
     max_replacements: usize,
     /// Exclude lowercase-only candidates completed by the earlier CPU run
-    #[arg(long)]
+    #[arg(long, env = "RECOVERME_LOWERCASE_ALREADY_TRIED")]
     lowercase_already_tried: bool,
+    /// Candidate token order
+    #[arg(long, env = "RECOVERME_ORDER", value_enum, default_value_t = OrderMode::Permuted)]
+    order: OrderMode,
+    /// Candidate spacing strategy
+    #[arg(long, env = "RECOVERME_SPACING", value_enum, default_value_t = SpacingMode::Concatenated)]
+    spacing: SpacingMode,
+    /// Exclude the all-concatenated pattern as previously exhausted
+    #[arg(long, env = "RECOVERME_CONCATENATED_ALREADY_TRIED")]
+    concatenated_already_tried: bool,
 }
 
 #[derive(Debug, Args)]
@@ -94,7 +116,7 @@ struct SessionArgs {
     #[command(flatten)]
     secrets: SecretInputs,
     /// Durable recovery state directory
-    #[arg(long)]
+    #[arg(long, env = "RECOVERME_STATE_DIR")]
     state_dir: PathBuf,
     /// Backend to benchmark, or auto for every compiled backend
     #[arg(long, value_enum, default_value_t = BackendKind::Auto)]
@@ -103,7 +125,7 @@ struct SessionArgs {
     #[arg(long, default_value_t = 65_536)]
     sample_size: usize,
     /// Sweep production batch and workgroup sizes and retain the fastest result
-    #[arg(long)]
+    #[arg(long, env = "RECOVERME_AUTOTUNE")]
     autotune: bool,
 }
 
@@ -112,10 +134,10 @@ struct RunArgs {
     #[command(flatten)]
     secrets: SecretInputs,
     /// Durable recovery state directory
-    #[arg(long)]
+    #[arg(long, env = "RECOVERME_STATE_DIR")]
     state_dir: PathBuf,
     /// Last phase authorized for this run
-    #[arg(long, value_enum)]
+    #[arg(long)]
     through: SearchPhase,
     /// Seed-derivation backend
     #[arg(long, value_enum, default_value_t = BackendKind::Auto)]
@@ -126,10 +148,13 @@ struct RunArgs {
 }
 
 fn main() -> Result<()> {
+    recoverme::config::apply_config_defaults()?;
     pretty_env_logger::init();
     color_eyre::install()?;
 
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    let _config = cli.config;
+    match cli.command {
         Command::Plan(args) => plan(args),
         Command::Benchmark(args) => benchmark(args),
         Command::Run(args) => run(args),
@@ -146,9 +171,12 @@ fn plan(args: PlanArgs) -> Result<()> {
         neighbors_per_word: args.neighbors,
         max_replacements: args.max_replacements,
         lowercase_already_tried: args.lowercase_already_tried,
+        order: args.order,
+        spacing: args.spacing,
+        concatenated_already_tried: args.concatenated_already_tried,
         ..RecoverySettings::default()
     };
-    let recovery_plan = RecoveryPlan::compile(&inputs.written_words, settings.clone())?;
+    let recovery_plan = RecoveryPlan::compile_recipe(&inputs.recipe, settings.clone())?;
     let fingerprint = args
         .fingerprint
         .map_or_else(load_target_fingerprint_from_env, Ok)?;
@@ -429,7 +457,7 @@ fn load_session(
     let manifest = existing.manifest().clone();
     let target = existing.verification_target()?;
     let inputs = secrets.load()?;
-    let plan = RecoveryPlan::compile(&inputs.written_words, manifest.settings.clone())?;
+    let plan = RecoveryPlan::compile_recipe(&inputs.recipe, manifest.settings.clone())?;
     let spec_hash = recovery_spec_hash_for_target(&inputs, &target, &manifest.settings);
     let state = RecoveryState::open_or_create_for_target(
         state_dir,
@@ -542,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn secret_file_arguments_must_be_supplied_together() {
+    fn secret_file_arguments_are_validated_together() {
         let cli = Cli::try_parse_from([
             "recoverme",
             "plan",
@@ -552,6 +580,10 @@ mod tests {
             "mnemonic.txt",
         ]);
 
-        assert!(cli.is_err());
+        let cli = cli.unwrap();
+        let Command::Plan(args) = cli.command else {
+            panic!("expected plan command");
+        };
+        assert!(args.secrets.load().is_err());
     }
 }

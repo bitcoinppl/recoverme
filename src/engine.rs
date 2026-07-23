@@ -240,6 +240,7 @@ mod tests {
             .unwrap();
         let inputs = RecoveryInputs {
             mnemonic: mnemonic.clone(),
+            recipe: crate::domain::RecoveryRecipe::from_written_words(&words),
             written_words: words,
         };
         let mut state = RecoveryState::open_or_create(
@@ -298,6 +299,7 @@ mod tests {
         let fingerprint = "00000000".parse::<TargetFingerprint>().unwrap();
         let inputs = RecoveryInputs {
             mnemonic: mnemonic.clone(),
+            recipe: crate::domain::RecoveryRecipe::from_written_words(&words),
             written_words: words,
         };
         let mut state = RecoveryState::open_or_create(
