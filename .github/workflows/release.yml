@@ -1,0 +1,270 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - id: version
+        name: Validate release version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          python3 - "$EVENT_NAME" "$REF_NAME" >>"$GITHUB_OUTPUT" <<'PY'
+          import pathlib
+          import re
+          import sys
+          import tomllib
+
+          event_name, ref_name = sys.argv[1:]
+          manifests = (
+              pathlib.Path("Cargo.toml"),
+              pathlib.Path("jax/pyproject.toml"),
+              pathlib.Path("jax/native/Cargo.toml"),
+          )
+          versions = []
+          for manifest in manifests:
+              with manifest.open("rb") as handle:
+                  document = tomllib.load(handle)
+              package = document.get("package") or document.get("project")
+              versions.append((manifest, package["version"]))
+
+          version = versions[0][1]
+          mismatches = [
+              f"{manifest}: {candidate}"
+              for manifest, candidate in versions
+              if candidate != version
+          ]
+          if mismatches:
+              raise SystemExit(
+                  "package versions do not match:\n" + "\n".join(mismatches)
+              )
+
+          heading = re.compile(rf"^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}$")
+          if not any(heading.fullmatch(line) for line in pathlib.Path("CHANGELOG.md").read_text().splitlines()):
+              raise SystemExit(f"CHANGELOG.md has no dated [{version}] release")
+
+          if event_name == "push" and ref_name != f"v{version}":
+              raise SystemExit(
+                  f"tag {ref_name!r} does not match package version v{version}"
+              )
+
+          print(f"version={version}")
+          PY
+
+  verify:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs:
+      - validate
+      - verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            features: metal
+            platform: macos
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            features: ""
+            platform: linux
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            features: ""
+            platform: linux
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Install musl tools
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+      - name: Install Rust
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add "$TARGET" --toolchain stable
+      - name: Test release target
+        env:
+          FEATURES: ${{ matrix.features }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          args=(test --locked --all-targets --target "$TARGET")
+          if [[ -n "$FEATURES" ]]; then
+            args+=(--features "$FEATURES")
+          fi
+          cargo +stable "${args[@]}"
+      - name: Build release target
+        env:
+          FEATURES: ${{ matrix.features }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          args=(build --locked --release --target "$TARGET")
+          if [[ -n "$FEATURES" ]]; then
+            args+=(--features "$FEATURES")
+          fi
+          cargo +stable "${args[@]}"
+      - name: Package release archive
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          binary="target/$TARGET/release/recoverme"
+          "$binary" --version | grep --fixed-strings --line-regexp "recoverme $VERSION"
+
+          description=$(/usr/bin/file "$binary")
+          if [[ "$PLATFORM" == "linux" ]]; then
+            grep --extended-regexp --ignore-case 'static|statically linked' <<<"$description"
+          else
+            grep --fixed-strings "arm64" <<<"$description"
+          fi
+
+          archive_base="recoverme-v$VERSION-$TARGET"
+          staging="$RUNNER_TEMP/$archive_base"
+          mkdir "$staging"
+          install -m 0755 "$binary" "$staging/recoverme"
+          install -m 0644 README.md LICENSE-APACHE LICENSE-MIT "$staging/"
+          COPYFILE_DISABLE=1 tar \
+            -C "$RUNNER_TEMP" \
+            -czf "$GITHUB_WORKSPACE/$archive_base.tar.gz" \
+            "$archive_base"
+
+          python3 - "$GITHUB_WORKSPACE/$archive_base.tar.gz" "$archive_base" <<'PY'
+          import sys
+          import tarfile
+
+          archive, base = sys.argv[1:]
+          expected = {
+              base,
+              f"{base}/recoverme",
+              f"{base}/README.md",
+              f"{base}/LICENSE-APACHE",
+              f"{base}/LICENSE-MIT",
+          }
+          with tarfile.open(archive, "r:gz") as bundle:
+              members = {member.name.rstrip("/"): member for member in bundle}
+          if set(members) != expected:
+              raise SystemExit(
+                  f"unexpected archive members: {sorted(set(members) ^ expected)}"
+              )
+          if members[f"{base}/recoverme"].mode & 0o111 == 0:
+              raise SystemExit("packaged binary is not executable")
+          PY
+      - name: Upload release archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.target }}
+          path: recoverme-v${{ needs.validate.outputs.version }}-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs:
+      - validate
+      - build
+    runs-on: ubuntu-24.04
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Download release archives
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Validate assets and generate checksums
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          cd dist
+          expected=(
+            "recoverme-v$VERSION-aarch64-apple-darwin.tar.gz"
+            "recoverme-v$VERSION-aarch64-unknown-linux-musl.tar.gz"
+            "recoverme-v$VERSION-x86_64-unknown-linux-musl.tar.gz"
+          )
+          mapfile -t actual < <(find . -maxdepth 1 -type f -printf '%f\n' | sort)
+          mapfile -t sorted_expected < <(printf '%s\n' "${expected[@]}" | sort)
+          diff --unified <(printf '%s\n' "${sorted_expected[@]}") <(printf '%s\n' "${actual[@]}")
+          sha256sum "${sorted_expected[@]}" >SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - name: Attest release archives
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - name: Attest checksum manifest
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
+        with:
+          subject-path: dist/SHA256SUMS
+      - name: Upload complete release bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: recoverme-v${{ needs.validate.outputs.version }}-release-assets
+          path: dist
+          if-no-files-found: error
+      - name: Extract release notes
+        if: github.event_name == 'push'
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          python3 - "$VERSION" >release-notes.md <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          version = sys.argv[1]
+          lines = pathlib.Path("CHANGELOG.md").read_text().splitlines()
+          heading = re.compile(rf"^## \[{re.escape(version)}\] - ")
+          start = next(
+              index + 1
+              for index, line in enumerate(lines)
+              if heading.match(line)
+          )
+          end = next(
+              (
+                  index
+                  for index in range(start, len(lines))
+                  if lines[index].startswith("## ")
+              ),
+              len(lines),
+          )
+          body = "\n".join(lines[start:end]).strip()
+          if not body:
+              raise SystemExit(f"CHANGELOG.md [{version}] section is empty")
+          print(body)
+          PY
+      - name: Create draft prerelease
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/*.tar.gz \
+            dist/SHA256SUMS \
+            --draft \
+            --notes-file release-notes.md \
+            --prerelease \
+            --title "recoverme v$VERSION (preview)" \
+            --verify-tag

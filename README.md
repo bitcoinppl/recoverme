@@ -13,6 +13,8 @@ The Rust CLI is the stable implementation. The [JAX frontend](jax/README.md) is
 experimental and intended for users who can evaluate its Python and accelerator
 security tradeoffs.
 
+See the [changelog](CHANGELOG.md) for release details.
+
 ## Candidate model
 
 The simple input is one written token per line. There is no fixed seven-word
@@ -38,9 +40,83 @@ The main search controls are:
 Every displayed "Exact passphrase" is the byte string supplied to BIP39,
 including any spaces.
 
+## Install
+
+The v0.2.0 preview provides these GitHub-built binaries:
+
+| Platform | Backend | Archive |
+| --- | --- | --- |
+| Apple Silicon macOS | CPU, Metal, and hybrid | `recoverme-v0.2.0-aarch64-apple-darwin.tar.gz` |
+| x86-64 Linux | Static CPU | `recoverme-v0.2.0-x86_64-unknown-linux-musl.tar.gz` |
+| ARM64 Linux | Static CPU | `recoverme-v0.2.0-aarch64-unknown-linux-musl.tar.gz` |
+
+Windows and Intel macOS binaries are not provided. Install the matching binary
+with:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://raw.githubusercontent.com/bitcoinppl/recoverme/v0.2.0/install.sh |
+  sh
+```
+
+The installer verifies the archive checksum and, when an authenticated GitHub
+CLI is available, its artifact attestations. It installs to `/usr/local/bin` by
+default. Set `RECOVERME_INSTALL_DIR` to choose another directory:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://raw.githubusercontent.com/bitcoinppl/recoverme/v0.2.0/install.sh |
+  RECOVERME_INSTALL_DIR="$HOME/.local/bin" sh
+```
+
+For manual installation, download the archive for the target machine and the
+checksum manifest from
+[GitHub Releases](https://github.com/bitcoinppl/recoverme/releases). These
+commands require the GitHub CLI:
+
+```sh
+repo=bitcoinppl/recoverme
+version=v0.2.0
+archive=recoverme-v0.2.0-aarch64-apple-darwin.tar.gz
+
+gh release download "$version" \
+  --repo "$repo" \
+  --pattern "$archive" \
+  --pattern SHA256SUMS
+```
+
+Set `archive` to the matching Linux name when needed. Verify both the checksum
+and GitHub build provenance before extracting or running the binary:
+
+```sh
+if command -v sha256sum >/dev/null; then
+  grep --fixed-strings " $archive" SHA256SUMS | sha256sum --check
+else
+  grep --fixed-strings " $archive" SHA256SUMS | shasum -a 256 --check
+fi
+
+gh attestation verify SHA256SUMS --repo "$repo"
+gh attestation verify "$archive" --repo "$repo"
+```
+
+Install the verified binary:
+
+```sh
+directory=${archive%.tar.gz}
+tar -xzf "$archive"
+sudo install -m 0755 "$directory/recoverme" /usr/local/bin/recoverme
+recoverme --version
+```
+
+The v0.2.0 macOS binary is not signed or notarized. After verification, macOS
+may require selecting **Open Anyway** for `recoverme` in **System Settings →
+Privacy & Security**.
+
 ## Build
 
-The portable CPU build works everywhere supported by Rust:
+The CPU source build is intended for Unix platforms supported by Rust. Windows
+is not supported because owner-only secret-file checks do not validate Windows
+ACLs.
 
 ```sh
 cargo build --release

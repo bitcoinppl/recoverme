@@ -42,4 +42,18 @@ Keep changes focused, explain any candidate-order or state-format impact, and
 include the commands used for verification. Documentation and examples must
 contain only generated public data.
 
+## Releases
+
+Keep the versions in `Cargo.toml`, `jax/pyproject.toml`, and
+`jax/native/Cargo.toml` aligned, and add a dated changelog entry before starting
+a release.
+
+Run the Release workflow manually against the intended revision first. Inspect
+the complete workflow artifact, verify all checksums and attestations, and test
+the binaries on their target platforms. After the dry run passes, create and
+push an annotated `vX.Y.Z` tag. The tag workflow creates a draft prerelease; it
+does not publish automatically. Review the draft and its assets before
+publishing it from GitHub. Enable immutable releases before publishing the first
+release.
+
 Contributions are accepted under the project's MIT OR Apache-2.0 license.
