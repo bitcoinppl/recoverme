@@ -2,12 +2,11 @@
 
 `recoverme` is an offline BIP39 passphrase recovery tool. It searches
 deterministically across written words, capitalization, ordering, spacing, and
-nearby BIP39 words while keeping resumable owner-only state.
+nearby BIP39 words. Owner-only state files let interrupted searches resume.
 
-> This software cannot guarantee recovery. Use it only for wallets you own or
-> are explicitly authorized to recover. Work on an offline computer, never put
-> a real mnemonic or passphrase in source control, and always verify a possible
-> match on the Coldcard.
+> This software cannot guarantee recovery. Work on an offline computer, never
+> put a real mnemonic or passphrase in source control, and always verify a
+> possible match on the Coldcard.
 
 The Rust CLI is the stable implementation. The [JAX frontend](jax/README.md) is
 experimental and intended for users who can evaluate its Python and accelerator
@@ -17,9 +16,9 @@ See the [changelog](CHANGELOG.md) for release details.
 
 ## Candidate model
 
-The simple input is one written token per line. There is no fixed seven-word
-assumption; a recipe may contain up to 100 slots, though order, case, spacing,
-and substitution choices grow combinatorially.
+A word list contains one written token per line. Recipes may contain up to 100
+slots; the tool does not assume seven words. Order, case, spacing, and
+substitution choices grow combinatorially.
 
 The main search controls are:
 
@@ -59,9 +58,9 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   sh
 ```
 
-The installer verifies the archive checksum and, when an authenticated GitHub
-CLI is available, its artifact attestations. It installs to `/usr/local/bin` by
-default. Set `RECOVERME_INSTALL_DIR` to choose another directory:
+The installer verifies the archive checksum. If an authenticated GitHub CLI is
+available, it also verifies the artifact attestations. The default installation
+directory is `/usr/local/bin`; set `RECOVERME_INSTALL_DIR` to use another:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
@@ -69,10 +68,9 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   RECOVERME_INSTALL_DIR="$HOME/.local/bin" sh
 ```
 
-For manual installation, download the archive for the target machine and the
-checksum manifest from
-[GitHub Releases](https://github.com/bitcoinppl/recoverme/releases). These
-commands require the GitHub CLI:
+For a manual installation, download the matching archive and checksum manifest
+from [GitHub Releases](https://github.com/bitcoinppl/recoverme/releases). The
+following commands require the GitHub CLI:
 
 ```sh
 repo=bitcoinppl/recoverme
@@ -114,15 +112,15 @@ Privacy & Security**.
 
 ## Build
 
-The CPU source build is intended for Unix platforms supported by Rust. Windows
-is not supported because owner-only secret-file checks do not validate Windows
+The CPU source build supports Unix platforms with Rust support. Windows is
+unsupported because the owner-only secret-file checks do not validate Windows
 ACLs.
 
 ```sh
 cargo build --release
 ```
 
-Optional CubeCL backends are available for supported toolchains:
+Supported toolchains can also build the optional CubeCL backends:
 
 ```sh
 cargo build --release --features metal
@@ -239,15 +237,15 @@ Supported scoped environment variables include:
 - `RECOVERME_LOWERCASE_ALREADY_TRIED`
 - `RECOVERME_CONCATENATED_ALREADY_TRIED`
 
-Environment inputs are not printed, but another process running as the same
-user may be able to inspect them. Owner-only files are preferred.
+`recoverme` does not print environment inputs, but another process running as
+the same user may be able to inspect them. Prefer owner-only files.
 
 ## Match verification and state
 
-A four-byte XFP can collide. If available, provide an owner-only depth-zero
-master XPUB with `--master-xpub-file` so complete public-key verification can
-reject XFP collisions automatically. Manual Coldcard verification remains
-required.
+A four-byte XFP can collide. Use `--master-xpub-file` to provide an owner-only
+depth-zero master XPUB when available. `recoverme` can then reject XFP
+collisions through complete public-key verification. Manual Coldcard
+verification remains required.
 
 If manual verification rejects a pending match:
 
