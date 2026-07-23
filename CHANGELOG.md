@@ -2,7 +2,7 @@
 
 ## [0.2.0] - 2026-07-23
 
-`recoverme` 0.2.0 is an initial preview release of the offline Coldcard BIP39
+`recoverme` 0.2.0 is an initial preview release of the offline BIP39
 passphrase recovery tool.
 
 ### Highlights

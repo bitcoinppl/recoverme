@@ -39,7 +39,7 @@ def main() -> None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="recoverme-jax",
-        description="JAX-accelerated deterministic Coldcard passphrase recovery",
+        description="JAX-accelerated deterministic BIP39 passphrase recovery",
     )
     commands = parser.add_subparsers(required=True)
 

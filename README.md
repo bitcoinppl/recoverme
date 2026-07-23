@@ -1,6 +1,6 @@
 # recoverme
 
-`recoverme` is an offline Coldcard BIP39 passphrase recovery tool. It searches
+`recoverme` is an offline BIP39 passphrase recovery tool. It searches
 deterministically across written words, capitalization, ordering, spacing, and
 nearby BIP39 words while keeping resumable owner-only state.
 

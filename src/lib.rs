@@ -1,4 +1,4 @@
-//! Deterministic, resumable Coldcard BIP39 passphrase recovery
+//! Deterministic, resumable BIP39 passphrase recovery
 
 pub mod backend;
 pub mod config;
