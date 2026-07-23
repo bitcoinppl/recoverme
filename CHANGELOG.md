@@ -21,6 +21,8 @@ recovery tool.
   only on a potentially colliding four-byte fingerprint
 - Includes an experimental, source-only JAX frontend for users who can evaluate
   its Python and accelerator security tradeoffs
+- Keeps the Rust CubeCL and JAX CUDA backends experimental and source-only;
+  neither has been validated on NVIDIA hardware for this release
 
 ### Performance
 

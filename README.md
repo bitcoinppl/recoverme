@@ -130,6 +130,18 @@ cargo build --release --features cuda
 The Metal build also provides a `hybrid` backend. Benchmark on the target
 machine instead of assuming an accelerator is faster.
 
+### Experimental CUDA support
+
+The Rust CubeCL and JAX CUDA backends are experimental and source-only. Neither
+has been validated on NVIDIA hardware for this release, and CUDA binaries are
+not included in the release downloads. Compare CUDA results with the CPU
+backend before using it for a recovery.
+
+Testing and code contributions are welcome. If you have an NVIDIA GPU, please
+[open an issue](https://github.com/bitcoinppl/recoverme/issues) with the GPU
+model, driver and CUDA versions, build command, test results, and benchmark
+output.
+
 ## Protect the inputs
 
 Put the English BIP39 mnemonic and written words in separate files, then make

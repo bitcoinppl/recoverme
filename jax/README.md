@@ -23,9 +23,15 @@ After changing the shared Rust core:
 uv sync --locked --reinstall-package recoverme-jax
 ```
 
-For supported NVIDIA Linux systems, add either `--extra cuda12` or
-`--extra cuda13`. The extras are mutually exclusive. JAX has no supported Apple
-Metal backend; macOS uses JAX CPU.
+CUDA support is experimental and has not been validated on NVIDIA hardware for
+this release. On NVIDIA Linux systems, add either `--extra cuda12` or
+`--extra cuda13`. The extras are mutually exclusive. Compare CUDA results with
+the CPU backend before using it for a recovery. JAX has no supported Apple Metal
+backend; macOS uses JAX CPU.
+
+Testing and code contributions are welcome. Please
+[open an issue](https://github.com/bitcoinppl/recoverme/issues) with the GPU
+model, driver and CUDA versions, test results, and benchmark output.
 
 ## Use
 
