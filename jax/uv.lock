@@ -832,7 +832,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "jax", specifier = ">=0.7" },
-    { name = "jax", extras = ["cuda12"], marker = "sys_platform == 'linux' and extra == 'cuda12'", specifier = ">=0.7" },
+    { name = "jax", extras = ["cuda12"], marker = "sys_platform == 'linux' and extra == 'cuda12'", specifier = ">=0.11.0" },
     { name = "jax", extras = ["cuda13"], marker = "sys_platform == 'linux' and extra == 'cuda13'", specifier = ">=0.7" },
     { name = "numpy", specifier = ">=2" },
 ]
