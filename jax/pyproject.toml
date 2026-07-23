@@ -27,7 +27,7 @@ dev = [
   "mnemonic>=0.21",
   "mypy>=1.17",
   "pytest>=8.4",
-  "ruff>=0.12",
+  "ruff>=0.16.0",
 ]
 
 [tool.uv]
