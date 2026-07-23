@@ -1,0 +1,7 @@
+/target
+output.txt
+flamegraph.svg
+profile.json
+words
+/vendor
+.envrc

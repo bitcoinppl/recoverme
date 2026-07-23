@@ -1,0 +1,58 @@
+[package]
+name = "recoverme"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+cube-cpu = ["dep:cubecl", "cubecl/std", "cubecl/stdlib", "cubecl/cpu"]
+metal = ["dep:cubecl", "cubecl/std", "cubecl/stdlib", "cubecl/metal"]
+cuda = ["dep:cubecl", "cubecl/std", "cubecl/stdlib", "cubecl/cuda"]
+
+[dependencies]
+# cli
+clap = { version = "4.5", features = ["derive"] }
+ctrlc = "3.4"
+
+# parallel
+rayon = "1.10"
+
+# utils
+hex = "0.4"
+hmac = "0.12"
+pbkdf2 = "0.12"
+sha2 = { version = "0.10", features = ["asm"] }
+strsim = "0.11"
+thiserror = "2"
+zeroize = { version = "1.8", features = ["derive"] }
+
+# serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# bitcoin
+bip32 = "0.5"
+bip39 = "2"
+
+# accelerator
+cubecl = { version = "=0.10.0", default-features = false, optional = true }
+
+color-eyre = "0.6"
+
+# logging
+pretty_env_logger = "0.5"
+log = "0.4"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = 3
+
+
+[profile.profiling]
+inherits = "release"
+debug = true
+
+[dev-dependencies]
+pretty_assertions = "1"
+tempfile = "3"
