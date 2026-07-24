@@ -2,7 +2,6 @@
 name = "recoverme"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.87"
 authors = ["Praveen Perera"]
 description = "Offline, deterministic BIP39 passphrase recovery"
 license = "MIT OR Apache-2.0"
