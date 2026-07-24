@@ -207,11 +207,11 @@ fn read_environment(name: &'static str) -> Result<Zeroizing<String>, RecoverErro
     }
 }
 
-fn read_secret(path: &Path) -> Result<String, RecoverError> {
+pub(crate) fn read_secret(path: &Path) -> Result<String, RecoverError> {
     fs::read_to_string(path).map_err(|error| RecoverError::io(path, error))
 }
 
-fn check_secret_file(path: &Path) -> Result<(), RecoverError> {
+pub(crate) fn check_secret_file(path: &Path) -> Result<(), RecoverError> {
     let metadata = fs::metadata(path).map_err(|error| RecoverError::io(path, error))?;
     if !metadata.is_file() {
         return Err(RecoverError::io(

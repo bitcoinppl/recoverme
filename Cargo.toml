@@ -3,7 +3,7 @@ name = "recoverme"
 version = "0.2.0"
 edition = "2021"
 authors = ["Praveen Perera"]
-description = "Offline, deterministic BIP39 passphrase recovery"
+description = "Offline, deterministic BIP39 passphrase and mnemonic recovery"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 documentation = "https://docs.rs/recoverme"
@@ -27,6 +27,8 @@ rayon = "1.10"
 # utils
 hex = "0.4"
 hmac = "0.12"
+num-bigint = { version = "0.4", features = ["serde"] }
+num-traits = "0.2"
 pbkdf2 = "0.12"
 sha2 = { version = "0.10", features = ["asm"] }
 strsim = "0.11"

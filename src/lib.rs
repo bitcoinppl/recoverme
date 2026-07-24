@@ -1,4 +1,4 @@
-//! Deterministic, resumable BIP39 passphrase recovery
+//! Deterministic, resumable BIP39 passphrase and mnemonic recovery
 
 pub mod backend;
 pub mod benchmark;
@@ -16,6 +16,9 @@ pub mod error;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod hybrid_backend;
 pub mod input;
+pub mod mnemonic;
+pub mod mnemonic_engine;
+pub mod mnemonic_state;
 pub mod search;
 pub mod state;
 

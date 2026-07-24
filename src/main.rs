@@ -7,6 +7,8 @@ use std::{
 use bip39::Language;
 use clap::{Args, Parser, Subcommand};
 use color_eyre::eyre::{Result, WrapErr};
+use num_bigint::BigUint;
+use num_traits::ToPrimitive;
 use recoverme::{
     backend::{available_backends, resolve_backend},
     domain::{
@@ -18,6 +20,13 @@ use recoverme::{
         load_inputs, load_inputs_from_env, load_inputs_with_recipe, load_master_xpub,
         load_target_fingerprint_from_env, recovery_spec_hash_for_target, RecoveryInputs,
     },
+    mnemonic::{
+        load_mnemonic_recovery_inputs, mnemonic_spec_hash, MnemonicPlan, MnemonicRecoveryInputs,
+    },
+    mnemonic_engine::{
+        benchmark_mnemonic_backend, remaining_work, run_mnemonic_recovery, MnemonicRunOutcome,
+    },
+    mnemonic_state::MnemonicRecoveryState,
     search::{expected_xfp_collisions, xfp_collision_probability, RecoveryPlan},
     state::{MatchStatus, RecoveryState},
 };
@@ -43,6 +52,30 @@ enum Command {
     /// Reject a pending match after manual Coldcard verification
     RejectMatch {
         /// Durable recovery state directory
+        #[arg(long, env = "RECOVERME_STATE_DIR")]
+        state_dir: PathBuf,
+        /// Candidate identifier printed when the match was found
+        #[arg(long)]
+        match_id: String,
+    },
+    /// Recover missing words from a position-aware BIP39 mnemonic template
+    Mnemonic {
+        #[command(subcommand)]
+        command: MnemonicCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MnemonicCommand {
+    /// Validate a template, calculate its search, and create durable state
+    Plan(MnemonicPlanArgs),
+    /// Measure the CPU mnemonic-recovery pipeline
+    Benchmark(MnemonicBenchmarkArgs),
+    /// Execute or resume the complete mnemonic search
+    Run(MnemonicRunArgs),
+    /// Reject a mnemonic match after independent wallet verification
+    RejectMatch {
+        /// Durable mnemonic-recovery state directory
         #[arg(long, env = "RECOVERME_STATE_DIR")]
         state_dir: PathBuf,
         /// Candidate identifier printed when the match was found
@@ -147,6 +180,80 @@ struct RunArgs {
     yes: bool,
 }
 
+#[derive(Debug, Args)]
+struct MnemonicSecretInputs {
+    /// Owner-only file with one BIP39 word or `?` per position
+    #[arg(long, env = "RECOVERME_TEMPLATE_FILE")]
+    template_file: PathBuf,
+    #[command(flatten)]
+    passphrase: MnemonicPassphraseSource,
+}
+
+#[derive(Debug, Args)]
+#[group(required = true, multiple = false)]
+struct MnemonicPassphraseSource {
+    /// Owner-only file containing the known BIP39 passphrase
+    #[arg(
+        long,
+        env = "RECOVERME_PASSPHRASE_FILE",
+        conflicts_with = "empty_passphrase"
+    )]
+    passphrase_file: Option<PathBuf>,
+    /// Explicitly confirm that the BIP39 passphrase is empty
+    #[arg(
+        long,
+        env = "RECOVERME_EMPTY_PASSPHRASE",
+        conflicts_with = "passphrase_file"
+    )]
+    empty_passphrase: bool,
+}
+
+impl MnemonicSecretInputs {
+    fn load(&self) -> Result<MnemonicRecoveryInputs> {
+        Ok(load_mnemonic_recovery_inputs(
+            &self.template_file,
+            self.passphrase.passphrase_file.as_deref(),
+            self.passphrase.empty_passphrase,
+        )?)
+    }
+}
+
+#[derive(Debug, Args)]
+struct MnemonicPlanArgs {
+    #[command(flatten)]
+    secrets: MnemonicSecretInputs,
+    /// Owner-only file containing the depth-zero master extended public key
+    #[arg(long, env = "RECOVERME_MASTER_XPUB_FILE")]
+    master_xpub_file: PathBuf,
+    /// Durable mnemonic-recovery state directory
+    #[arg(long, env = "RECOVERME_STATE_DIR")]
+    state_dir: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct MnemonicBenchmarkArgs {
+    #[command(flatten)]
+    secrets: MnemonicSecretInputs,
+    /// Durable mnemonic-recovery state directory
+    #[arg(long, env = "RECOVERME_STATE_DIR")]
+    state_dir: PathBuf,
+    /// Maximum checksum-valid candidates in the benchmark sample
+    #[arg(long, default_value_t = 4_096)]
+    sample_size: usize,
+}
+
+#[derive(Debug, Args)]
+struct MnemonicRunArgs {
+    #[command(flatten)]
+    secrets: MnemonicSecretInputs,
+    /// Durable mnemonic-recovery state directory
+    #[arg(long, env = "RECOVERME_STATE_DIR")]
+    state_dir: PathBuf,
+    /// Skip the final count and ETA confirmation
+    #[arg(long)]
+    yes: bool,
+}
+
 fn main() -> Result<()> {
     recoverme::config::apply_config_defaults()?;
     pretty_env_logger::init();
@@ -162,6 +269,15 @@ fn main() -> Result<()> {
             state_dir,
             match_id,
         } => reject_match(&state_dir, &match_id),
+        Command::Mnemonic { command } => match command {
+            MnemonicCommand::Plan(args) => mnemonic_plan(args),
+            MnemonicCommand::Benchmark(args) => mnemonic_benchmark(args),
+            MnemonicCommand::Run(args) => mnemonic_run(args),
+            MnemonicCommand::RejectMatch {
+                state_dir,
+                match_id,
+            } => mnemonic_reject_match(&state_dir, &match_id),
+        },
     }
 }
 
@@ -482,6 +598,181 @@ fn reject_match(state_dir: &Path, match_id: &str) -> Result<()> {
     Ok(())
 }
 
+fn mnemonic_plan(args: MnemonicPlanArgs) -> Result<()> {
+    let inputs = args.secrets.load()?;
+    let plan = MnemonicPlan::compile(inputs.template.clone())?;
+    let target = VerificationTarget::from_master_xpub(load_master_xpub(&args.master_xpub_file)?);
+    let spec_hash = mnemonic_spec_hash(&inputs, &target);
+    let mut state =
+        MnemonicRecoveryState::open_or_create(&args.state_dir, spec_hash, target, &plan)?;
+    if state.latest_benchmark().is_none() {
+        let record = benchmark_mnemonic_backend(&plan, &mut state, &inputs, 4_096)?;
+        println!(
+            "CPU baseline: {:.1} complete checks/s ({})",
+            record.checks_per_second, record.device
+        );
+    }
+    print_mnemonic_plan(&plan, &state);
+    println!("State: {}", args.state_dir.display());
+    Ok(())
+}
+
+fn mnemonic_benchmark(args: MnemonicBenchmarkArgs) -> Result<()> {
+    let (inputs, plan, mut state) = load_mnemonic_session(&args.state_dir, &args.secrets)?;
+    let record = benchmark_mnemonic_backend(&plan, &mut state, &inputs, args.sample_size)?;
+    print_benchmark(&record);
+    Ok(())
+}
+
+fn mnemonic_run(args: MnemonicRunArgs) -> Result<()> {
+    let (inputs, plan, mut state) = load_mnemonic_session(&args.state_dir, &args.secrets)?;
+    if state.latest_benchmark().is_none() {
+        let record = benchmark_mnemonic_backend(&plan, &mut state, &inputs, 4_096)?;
+        println!(
+            "Measured CPU: {:.1} complete checks/s",
+            record.checks_per_second
+        );
+    }
+
+    let remaining_assignments = remaining_work(&plan, &state.cursor());
+    let expected_remaining_candidates = expected_remaining_mnemonics(&plan, &remaining_assignments);
+    let rate = state
+        .latest_benchmark()
+        .map_or(0.0, |record| record.checks_per_second);
+    println!("Backend: cpu");
+    println!(
+        "Remaining entropy assignments: {}",
+        format_big_count(&remaining_assignments)
+    );
+    let qualifier = if plan.checksum_is_known() {
+        "approximately "
+    } else {
+        ""
+    };
+    println!(
+        "Checksum-valid mnemonics remaining: {qualifier}{}",
+        format_big_count(&expected_remaining_candidates)
+    );
+    if rate > 0.0 {
+        let candidates = expected_remaining_candidates
+            .to_f64()
+            .unwrap_or(f64::INFINITY);
+        println!(
+            "Estimated remaining time: {}",
+            format_duration(candidates / rate)
+        );
+    }
+
+    if !args.yes && !confirm("Start or resume this mnemonic search? [y/N] ")? {
+        println!("Cancelled");
+        return Ok(());
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let handler_stop = Arc::clone(&stop);
+    ctrlc::set_handler(move || {
+        handler_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    })
+    .wrap_err("failed to install Ctrl-C handler")?;
+
+    match run_mnemonic_recovery(&plan, &mut state, &inputs, stop)? {
+        MnemonicRunOutcome::Exhausted => {
+            println!("Mnemonic search exhausted without a wallet match")
+        }
+        MnemonicRunOutcome::Interrupted => {
+            println!("Stopped cleanly after the last completed batch")
+        }
+        MnemonicRunOutcome::MatchesFound(count) => {
+            println!(
+                "Found {count} mnemonic candidate(s); verify independently before using funds"
+            );
+            for record in state
+                .runtime()
+                .matches
+                .iter()
+                .filter(|record| record.status == MatchStatus::Pending)
+            {
+                let candidate = plan.candidate_at(&record.parsed_rank()?)?.ok_or_else(|| {
+                    recoverme::error::RecoverError::InvalidSetting(
+                        "stored mnemonic match no longer satisfies its template".into(),
+                    )
+                })?;
+                println!("Match ID: {}", record.id);
+                println!("Recovered mnemonic: {}", candidate.expose());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn mnemonic_reject_match(state_dir: &Path, match_id: &str) -> Result<()> {
+    let mut state = MnemonicRecoveryState::open_existing(state_dir)?;
+    state.reject_match(match_id)?;
+    println!("Rejected match {match_id}; the next run will continue from its checkpoint");
+    Ok(())
+}
+
+fn load_mnemonic_session(
+    state_dir: &Path,
+    secrets: &MnemonicSecretInputs,
+) -> Result<(MnemonicRecoveryInputs, MnemonicPlan, MnemonicRecoveryState)> {
+    let existing = MnemonicRecoveryState::open_existing(state_dir)?;
+    let target = existing.verification_target();
+    let inputs = secrets.load()?;
+    let plan = MnemonicPlan::compile(inputs.template.clone())?;
+    let spec_hash = mnemonic_spec_hash(&inputs, &target);
+    let state = MnemonicRecoveryState::open_or_create(state_dir, spec_hash, target, &plan)?;
+    Ok((inputs, plan, state))
+}
+
+fn print_mnemonic_plan(plan: &MnemonicPlan, state: &MnemonicRecoveryState) {
+    println!("Mnemonic words: {}", plan.template().word_count());
+    println!("Known positions: {}", plan.template().known_word_count());
+    println!(
+        "Missing positions: {}",
+        plan.template().missing_word_count()
+    );
+    println!("Unknown entropy bits: {}", plan.unknown_entropy_bits());
+    println!("Checksum bits: {}", plan.checksum_bits());
+    println!(
+        "Entropy assignments: {}",
+        format_big_count(plan.total_work())
+    );
+    let qualifier = if plan.checksum_is_known() {
+        "approximately "
+    } else {
+        ""
+    };
+    println!(
+        "Checksum-valid mnemonics: {qualifier}{}",
+        format_big_count(&plan.expected_candidates())
+    );
+    if let Some(benchmark) = state.latest_benchmark() {
+        println!(
+            "Estimated exhaustive time: {}",
+            format_duration(
+                plan.expected_candidates().to_f64().unwrap_or(f64::INFINITY)
+                    / benchmark.checks_per_second
+            )
+        );
+    }
+    if plan.expected_candidates() > BigUint::from(u32::MAX) {
+        println!("Master XPUB verification: enabled and required for this large candidate space");
+    }
+}
+
+fn expected_remaining_mnemonics(plan: &MnemonicPlan, assignments: &BigUint) -> BigUint {
+    if plan.checksum_is_known() {
+        if assignments == &BigUint::default() {
+            return BigUint::default();
+        }
+        let expected = assignments >> plan.checksum_bits();
+        expected.max(BigUint::from(1_u8))
+    } else {
+        assignments.clone()
+    }
+}
+
 fn load_session(
     state_dir: &Path,
     secrets: &SecretInputs,
@@ -561,7 +852,14 @@ fn confirm(prompt: &str) -> Result<bool> {
 }
 
 fn format_count(value: u128) -> String {
-    let digits = value.to_string();
+    format_decimal(&value.to_string())
+}
+
+fn format_big_count(value: &BigUint) -> String {
+    format_decimal(&value.to_str_radix(10))
+}
+
+fn format_decimal(digits: &str) -> String {
     let mut output = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, character) in digits.chars().enumerate() {
         if index > 0 && (digits.len() - index).is_multiple_of(3) {
@@ -618,5 +916,56 @@ mod tests {
             panic!("expected plan command");
         };
         assert!(args.secrets.load().is_err());
+    }
+
+    #[test]
+    fn mnemonic_plan_accepts_configurable_template_inputs() {
+        let cli = Cli::try_parse_from([
+            "recoverme",
+            "mnemonic",
+            "plan",
+            "--template-file",
+            "template.txt",
+            "--empty-passphrase",
+            "--master-xpub-file",
+            "master-xpub.txt",
+            "--state-dir",
+            "state",
+        ]);
+
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn mnemonic_inputs_reject_two_passphrase_sources() {
+        let cli = Cli::try_parse_from([
+            "recoverme",
+            "mnemonic",
+            "run",
+            "--template-file",
+            "template.txt",
+            "--passphrase-file",
+            "passphrase.txt",
+            "--empty-passphrase",
+            "--state-dir",
+            "state",
+        ]);
+
+        assert!(cli.is_err());
+    }
+
+    #[test]
+    fn mnemonic_inputs_require_an_explicit_passphrase_source() {
+        let cli = Cli::try_parse_from([
+            "recoverme",
+            "mnemonic",
+            "run",
+            "--template-file",
+            "template.txt",
+            "--state-dir",
+            "state",
+        ]);
+
+        assert!(cli.is_err());
     }
 }

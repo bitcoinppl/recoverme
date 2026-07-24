@@ -12,6 +12,9 @@ use crate::error::RecoverError;
 #[derive(Debug, Default, Deserialize)]
 struct FileConfig {
     pub mnemonic_file: Option<PathBuf>,
+    pub template_file: Option<PathBuf>,
+    pub passphrase_file: Option<PathBuf>,
+    pub empty_passphrase: Option<bool>,
     pub words_file: Option<PathBuf>,
     pub recipe_file: Option<PathBuf>,
     pub fingerprint: Option<String>,
@@ -33,6 +36,11 @@ pub fn apply_config_defaults() -> Result<(), RecoverError> {
     let config = load_file_config(&path)?;
 
     set_path("RECOVERME_MNEMONIC_FILE", config.mnemonic_file);
+    set_path("RECOVERME_TEMPLATE_FILE", config.template_file);
+    set_path("RECOVERME_PASSPHRASE_FILE", config.passphrase_file);
+    if config.empty_passphrase == Some(true) {
+        set_display("RECOVERME_EMPTY_PASSPHRASE", Some(true));
+    }
     set_path("RECOVERME_WORDS_FILE", config.words_file);
     set_path("RECOVERME_RECIPE_FILE", config.recipe_file);
     set_value("RECOVERME_FINGERPRINT", config.fingerprint);

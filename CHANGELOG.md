@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Mnemonic recovery
+
+- Recover missing positions from 12-, 15-, 18-, 21-, or 24-word English BIP39
+  templates with any number of known words
+- Enumerate entropy deterministically, construct or validate the BIP39 checksum,
+  and resume from owner-only big-integer checkpoints
+- Require complete master-XPUB verification and keep recovered words out of
+  durable runtime state
+- Support known and explicitly empty BIP39 passphrases on the CPU backend
+
 ### CUDA
 
 - Add GPU-first CUDA recovery with CPU public-key confirmation

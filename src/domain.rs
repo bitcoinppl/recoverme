@@ -489,6 +489,15 @@ impl VerificationTarget {
         })
     }
 
+    /// Construct a strong verification target from a depth-zero master public key
+    pub fn from_master_xpub(master_xpub: MasterXpubTarget) -> Self {
+        let fingerprint = TargetFingerprint(master_xpub.fingerprint());
+        Self::MasterXpub {
+            fingerprint,
+            master_xpub,
+        }
+    }
+
     /// Four-byte fingerprint shown by Coldcard
     pub const fn fingerprint(&self) -> TargetFingerprint {
         match self {

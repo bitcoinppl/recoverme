@@ -1,8 +1,8 @@
 # recoverme
 
-`recoverme` is an offline BIP39 passphrase recovery tool. It searches
-deterministically across written words, capitalization, ordering, spacing, and
-nearby BIP39 words. It can resume interrupted searches.
+`recoverme` is an offline BIP39 passphrase and mnemonic recovery tool. It
+searches deterministically across written passphrase clues or missing mnemonic
+positions and can resume interrupted searches.
 
 > This software cannot guarantee recovery. Work on an offline computer, never
 > put a real mnemonic or passphrase in source control, and always verify a
@@ -11,6 +11,9 @@ nearby BIP39 words. It can resume interrupted searches.
 The Rust CLI is the stable implementation. The [JAX frontend](jax/README.md) is
 experimental and intended for users who can evaluate its Python and accelerator
 security tradeoffs.
+
+Mnemonic recovery currently uses the CPU backend. Passphrase recovery supports
+the compiled CPU and accelerator backends described below.
 
 See the [changelog](CHANGELOG.md) for release details.
 
@@ -218,6 +221,76 @@ Progress is committed atomically after each completed batch. Ctrl-C stops
 after the current cryptographic batch; the same command resumes at the next
 unverified candidate.
 
+## Recover missing mnemonic words
+
+Mnemonic recovery supports English BIP39 mnemonics with 12, 15, 18, 21, or 24
+positions. Create an owner-only template containing one exact BIP39 word or `?`
+per line. The number of known and missing positions is determined by the
+template:
+
+```text
+abandon
+ability
+able
+about
+above
+absent
+absorb
+abstract
+?
+?
+?
+?
+```
+
+The final word contains both entropy and checksum bits. `recoverme` enumerates
+the unknown entropy and constructs or validates the checksum automatically.
+
+Protect the template, passphrase, and master XPUB:
+
+```sh
+chmod 600 mnemonic-template.txt passphrase.txt master-xpub.txt
+```
+
+Create a resumable plan with a known passphrase:
+
+```sh
+recoverme mnemonic plan \
+  --template-file mnemonic-template.txt \
+  --passphrase-file passphrase.txt \
+  --master-xpub-file master-xpub.txt \
+  --state-dir mnemonic-state
+```
+
+For a wallet with no BIP39 passphrase, make that choice explicit:
+
+```sh
+recoverme mnemonic plan \
+  --template-file mnemonic-template.txt \
+  --empty-passphrase \
+  --master-xpub-file master-xpub.txt \
+  --state-dir mnemonic-state
+```
+
+Benchmark or run the CPU search:
+
+```sh
+recoverme mnemonic benchmark \
+  --template-file mnemonic-template.txt \
+  --empty-passphrase \
+  --state-dir mnemonic-state
+
+recoverme mnemonic run \
+  --template-file mnemonic-template.txt \
+  --empty-passphrase \
+  --state-dir mnemonic-state
+```
+
+Mnemonic recovery requires a depth-zero master XPUB. A four-byte fingerprint
+is too weak to identify one mnemonic reliably in large searches. Runtime state
+stores a matching candidate's deterministic rank rather than its recovered
+words; the protected template is required to display it again.
+
 ## Advanced recipes
 
 An owner-only TOML recipe can express ranked alternatives and optional slots:
@@ -263,6 +336,18 @@ spacing = "coldcard"
 concatenated_already_tried = true
 ```
 
+Mnemonic-recovery defaults use the same config file format:
+
+```toml
+template_file = "mnemonic-template.txt"
+empty_passphrase = true
+master_xpub_file = "master-xpub.txt"
+state_dir = "mnemonic-state"
+```
+
+Set `passphrase_file` instead of `empty_passphrase` when the wallet has a
+BIP39 passphrase.
+
 ```sh
 chmod 600 recoverme.toml
 recoverme --config recoverme.toml plan
@@ -272,6 +357,8 @@ Supported scoped environment variables include:
 
 - `RECOVERME_CONFIG`
 - `RECOVERME_MNEMONIC_FILE`, `RECOVERME_WORDS_FILE`, `RECOVERME_RECIPE_FILE`
+- `RECOVERME_TEMPLATE_FILE`, `RECOVERME_PASSPHRASE_FILE`
+- `RECOVERME_EMPTY_PASSPHRASE`
 - `RECOVERME_MNEMONIC`, `RECOVERME_WORDS`, `RECOVERME_FINGERPRINT`
 - `RECOVERME_MASTER_XPUB_FILE`, `RECOVERME_STATE_DIR`
 - `RECOVERME_NEIGHBORS`, `RECOVERME_MAX_REPLACEMENTS`

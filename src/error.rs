@@ -86,7 +86,7 @@ pub enum RecoverError {
     #[error("fingerprint derivation failed: {0}")]
     FingerprintDerivation(String),
     /// Search cannot continue while candidates await manual verification
-    #[error("pending XFP matches must be verified or rejected before resuming")]
+    #[error("pending wallet matches must be verified or rejected before resuming")]
     PendingMatches,
     /// Requested match identifier does not exist or is already resolved
     #[error("pending match not found: {0}")]

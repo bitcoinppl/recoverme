@@ -113,9 +113,9 @@ impl BenchmarkRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MatchStatus {
-    /// Awaiting manual verification on the Coldcard
+    /// Awaiting independent wallet verification
     Pending,
-    /// Rejected as a random four-byte XFP collision
+    /// Rejected after independent verification
     Rejected,
 }
 
@@ -375,7 +375,7 @@ fn validate_manifest(
     Ok(())
 }
 
-fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, RecoverError> {
+pub(crate) fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, RecoverError> {
     let mut file = File::open(path).map_err(|error| RecoverError::io(path, error))?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
@@ -386,7 +386,7 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, RecoverError> {
     })
 }
 
-fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), RecoverError> {
+pub(crate) fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), RecoverError> {
     let bytes = serde_json::to_vec_pretty(value).map_err(|source| RecoverError::InvalidState {
         path: path.to_owned(),
         source,
@@ -412,7 +412,7 @@ fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Recover
     sync_parent(path)
 }
 
-fn create_private_directory(path: &Path) -> Result<(), RecoverError> {
+pub(crate) fn create_private_directory(path: &Path) -> Result<(), RecoverError> {
     fs::create_dir_all(path).map_err(|error| RecoverError::io(path, error))?;
     #[cfg(unix)]
     {
@@ -423,7 +423,7 @@ fn create_private_directory(path: &Path) -> Result<(), RecoverError> {
     Ok(())
 }
 
-fn protect_existing_file(path: &Path) -> Result<(), RecoverError> {
+pub(crate) fn protect_existing_file(path: &Path) -> Result<(), RecoverError> {
     if !path.exists() {
         return Ok(());
     }
@@ -437,7 +437,7 @@ fn protect_existing_file(path: &Path) -> Result<(), RecoverError> {
     Ok(())
 }
 
-fn check_private_state(directory: &Path) -> Result<(), RecoverError> {
+pub(crate) fn check_private_state(directory: &Path) -> Result<(), RecoverError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -467,7 +467,7 @@ fn sync_parent(path: &Path) -> Result<(), RecoverError> {
         .map_err(|error| RecoverError::io(parent, error))
 }
 
-fn unix_seconds() -> u64 {
+pub(crate) fn unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

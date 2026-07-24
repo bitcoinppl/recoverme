@@ -2321,6 +2321,7 @@ checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
 dependencies = [
  "num-integer",
  "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -2816,6 +2817,8 @@ dependencies = [
  "hex",
  "hmac",
  "log",
+ "num-bigint",
+ "num-traits",
  "pbkdf2",
  "pretty_assertions",
  "pretty_env_logger",
