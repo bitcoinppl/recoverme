@@ -14,6 +14,7 @@ RUN curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
         --output /tmp/rustup-init.sh \
         https://sh.rustup.rs \
     && sh /tmp/rustup-init.sh \
+        -y \
         --default-toolchain "${RUST_VERSION}" \
         --profile minimal \
         --no-modify-path \
