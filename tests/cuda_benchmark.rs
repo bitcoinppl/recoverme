@@ -14,9 +14,9 @@ const PUBLIC_TEST_PASSPHRASE: &str = "alphabriskcactusdaringeagerfabricgadget";
 const PUBLIC_TEST_WORDS: [&str; 7] = [
     "alpha", "brisk", "cactus", "daring", "eager", "fabric", "gadget",
 ];
-const SAMPLE_SIZE: usize = 65_536;
-const REPETITIONS: usize = 5;
-const BATCH_SIZE: usize = 65_536;
+const TUNING_BATCH_SIZES: [usize; 4] = [65_536, 131_072, 262_144, 524_288];
+const TUNING_REPETITIONS: usize = 3;
+const SUSTAINED_REPETITIONS: usize = 5;
 const WORKGROUP_SIZE: u32 = 128;
 
 #[test]
@@ -33,33 +33,9 @@ fn cuda_sustained_xfp_and_xpub_throughput() {
         ..RecoverySettings::default()
     };
     let plan = recoverme::search::RecoveryPlan::compile(&words, settings).unwrap();
-    let config = SustainedBenchmarkConfig {
-        sample_size: NonZeroUsize::new(SAMPLE_SIZE).unwrap(),
-        repetitions: NonZeroUsize::new(REPETITIONS).unwrap(),
-        batch_size: NonZeroUsize::new(BATCH_SIZE).unwrap(),
-        workgroup_size: NonZeroU32::new(WORKGROUP_SIZE),
-        through: SearchPhase::WrittenCase,
-    };
 
-    let xfp = benchmark_sustained_pipeline(
-        &plan,
-        &secret,
-        &fingerprint_target,
-        recoverme::domain::BackendKind::Cuda,
-        config,
-    )
-    .unwrap();
-    print_result(&xfp);
-
-    let xpub = benchmark_sustained_pipeline(
-        &plan,
-        &secret,
-        &target,
-        recoverme::domain::BackendKind::Cuda,
-        config,
-    )
-    .unwrap();
-    print_result(&xpub);
+    let xfp = autotune_and_benchmark(&plan, &secret, &fingerprint_target);
+    let xpub = autotune_and_benchmark(&plan, &secret, &target);
 
     assert_eq!(xfp.matches, 1);
     assert_eq!(xpub.matches, 1);
@@ -67,6 +43,53 @@ fn cuda_sustained_xfp_and_xpub_throughput() {
     assert!(xpub.sustained_checks_per_second.is_finite());
     assert!(xfp.sustained_checks_per_second > 0.0);
     assert!(xpub.sustained_checks_per_second > 0.0);
+}
+
+fn autotune_and_benchmark(
+    plan: &recoverme::search::RecoveryPlan,
+    secret: &SecretMnemonic,
+    target: &VerificationTarget,
+) -> SustainedBenchmarkResult {
+    let selected = TUNING_BATCH_SIZES
+        .map(|batch_size| {
+            let result = benchmark_sustained_pipeline(
+                plan,
+                secret,
+                target,
+                recoverme::domain::BackendKind::Cuda,
+                benchmark_config(batch_size, TUNING_REPETITIONS),
+            )
+            .unwrap();
+            print_result("tuning", &result);
+            result
+        })
+        .into_iter()
+        .max_by(|left, right| {
+            left.sustained_checks_per_second
+                .total_cmp(&right.sustained_checks_per_second)
+        })
+        .unwrap();
+
+    let result = benchmark_sustained_pipeline(
+        plan,
+        secret,
+        target,
+        recoverme::domain::BackendKind::Cuda,
+        benchmark_config(selected.batch_size, SUSTAINED_REPETITIONS),
+    )
+    .unwrap();
+    print_result("sustained", &result);
+    result
+}
+
+fn benchmark_config(batch_size: usize, repetitions: usize) -> SustainedBenchmarkConfig {
+    SustainedBenchmarkConfig {
+        sample_size: NonZeroUsize::new(batch_size).unwrap(),
+        repetitions: NonZeroUsize::new(repetitions).unwrap(),
+        batch_size: NonZeroUsize::new(batch_size).unwrap(),
+        workgroup_size: NonZeroU32::new(WORKGROUP_SIZE),
+        through: SearchPhase::WrittenCase,
+    }
 }
 
 fn public_master_xpub_target() -> VerificationTarget {
@@ -80,9 +103,9 @@ fn public_master_xpub_target() -> VerificationTarget {
     VerificationTarget::new(fingerprint, Some(master_xpub)).unwrap()
 }
 
-fn print_result(result: &SustainedBenchmarkResult) {
+fn print_result(stage: &str, result: &SustainedBenchmarkResult) {
     println!(
-        "GPUQ_BENCHMARK mode={} backend={} device={} sample={} repetitions={} batch={} workgroup={} sustained_checks_per_second={:.1} median_checks_per_second={:.1} minimum_checks_per_second={:.1} maximum_checks_per_second={:.1} matches={} iteration_milliseconds={:?} warmup_excluded=true",
+        "GPUQ_BENCHMARK stage={stage} mode={} backend={} device={} sample={} repetitions={} batch={} workgroup={} sustained_checks_per_second={:.1} median_checks_per_second={:.1} minimum_checks_per_second={:.1} maximum_checks_per_second={:.1} matches={} iteration_milliseconds={:?} warmup_excluded=true",
         result.verification_mode,
         result.backend,
         result.device,
