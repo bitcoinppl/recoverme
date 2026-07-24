@@ -1,4 +1,5 @@
 /target
+/.gpuq/
 output.txt
 flamegraph.svg
 profile.json

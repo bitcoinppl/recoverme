@@ -1,8 +1,7 @@
 schema_version = 1
 
 [workloads.cuda-canary]
-# run tests/cuda-canary/build-image.sh, then replace this placeholder with its digest
-image = "ghcr.io/bitcoinppl/recoverme-cuda-canary@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+image = "ghcr.io/bitcoinppl/recoverme-cuda-canary@sha256:b8691692bb98b642437e951342df7357b2cc0fa2443ebdd4bbf635c5e7b8330a"
 command = ["/usr/local/bin/recoverme-cuda-canary", "--ignored", "--exact", "cuda_public_fixture_matches_reference", "--nocapture", "--test-threads=1"]
 allowed_env = []
 required_secret_env = []
