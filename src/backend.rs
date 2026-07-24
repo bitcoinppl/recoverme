@@ -71,6 +71,12 @@ pub fn create_deriver(
         BackendKind::Hybrid => Ok(Box::new(HybridBackend::new(mnemonic)?)),
         #[cfg(feature = "cuda")]
         BackendKind::Cuda => Ok(Box::new(CubeSeedDeriver::cuda(mnemonic)?)),
+        #[cfg(not(all(
+            feature = "cube-cpu",
+            feature = "metal",
+            feature = "cuda",
+            target_os = "macos"
+        )))]
         unavailable => Err(RecoverError::BackendUnavailable(unavailable.to_string())),
     }
 }
