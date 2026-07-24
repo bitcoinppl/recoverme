@@ -45,9 +45,9 @@ tests/cuda-canary/build-image.sh ghcr.io/bitcoinppl/recoverme-cuda-canary:<tag>
 ```
 
 The script uses Docker Buildx when available, otherwise it falls back to
-Namespace's `nsc` remote builder. It requires `skopeo` to resolve the pushed
-image digest. After the push, copy the digest-qualified image reference printed
-by the script into `gpuq.toml`.
+Namespace's `nsc` remote builder. It uses `skopeo` or `crane` to resolve the
+pushed image digest. After the push, copy the digest-qualified image reference
+printed by the script into `gpuq.toml`.
 
 ## Pull requests
 
