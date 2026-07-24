@@ -1,0 +1,36 @@
+schema_version = 1
+
+[workloads.cuda-canary]
+# replace this placeholder with the pushed image digest before deploying
+image = "ghcr.io/bitcoinppl/recoverme-cuda-canary@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+command = ["/usr/local/bin/recoverme-cuda-canary", "--ignored", "--exact", "cuda_public_fixture_matches_reference", "--nocapture", "--test-threads=1"]
+allowed_env = []
+required_secret_env = []
+
+[deployments.cuda-canary-beam-rtx4090]
+workload = "cuda-canary"
+cpu_cores = 2.0
+memory_mib = 4096
+timeout_seconds = 900
+max_concurrency = 1
+log_mode = "capture"
+max_log_bytes = 67108864
+
+[deployments.cuda-canary-beam-rtx4090.provider]
+kind = "beam"
+gpu = "RTX4090"
+secret_sources = []
+
+[deployments.cuda-canary-modal-l40s]
+workload = "cuda-canary"
+cpu_cores = 2.0
+memory_mib = 4096
+timeout_seconds = 900
+max_concurrency = 1
+log_mode = "capture"
+max_log_bytes = 67108864
+
+[deployments.cuda-canary-modal-l40s.provider]
+kind = "modal"
+gpu = "L40S"
+secret_sources = []

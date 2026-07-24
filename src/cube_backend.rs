@@ -863,13 +863,19 @@ fn sha512_compress_host(state: &mut [u64; 8], block: &[u8; 128]) {
     state[7] = state[7].wrapping_add(h);
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(feature = "cube-cpu", all(feature = "metal", target_os = "macos"))
+))]
 mod tests {
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     use bip32::{Prefix, XPrv};
     use bip39::{Language, Mnemonic};
 
     use super::*;
-    use crate::domain::{Candidate, MasterXpubTarget, TargetFingerprint};
+    use crate::domain::Candidate;
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    use crate::domain::{MasterXpubTarget, TargetFingerprint};
 
     const PUBLIC_TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
 

@@ -62,6 +62,11 @@ opt-level = 3
 inherits = "release"
 debug = true
 
+[[test]]
+name = "cuda_canary"
+path = "tests/cuda_canary.rs"
+required-features = ["cuda"]
+
 [dev-dependencies]
 pretty_assertions = "1"
 tempfile = "3"
