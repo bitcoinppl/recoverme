@@ -9,7 +9,7 @@ required_secret_env = []
 [workloads.cuda-benchmark]
 image = "ghcr.io/bitcoinppl/recoverme-cuda-canary:hybrid-ee54c31@sha256:fbf49770ead8652a9d562114ddfa42e228f4570b38912f60420ac4397809bf1a"
 command = ["/usr/local/bin/recoverme-cuda-benchmark", "--ignored", "--exact", "cuda_sustained_xfp_and_xpub_throughput", "--nocapture", "--test-threads=1"]
-allowed_env = []
+allowed_env = ["RAYON_NUM_THREADS"]
 required_secret_env = []
 
 [deployments.cuda-canary-beam-rtx4090]
