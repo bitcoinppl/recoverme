@@ -69,6 +69,16 @@ pub enum RecoverError {
     /// Seed derivation failed
     #[error("seed derivation failed: {0}")]
     SeedDerivation(String),
+    /// A benchmark plan cannot fill every warmup and timed batch
+    #[error(
+        "benchmark requires {required} candidates but the selected recovery phases contain {available}"
+    )]
+    InsufficientBenchmarkCandidates {
+        /// Number of candidates needed for the requested measurement
+        required: usize,
+        /// Number of candidates available in the selected recovery phases
+        available: u128,
+    },
     /// Candidate preparation thread terminated unexpectedly
     #[error("candidate preparation worker terminated unexpectedly")]
     CandidatePreparationPanic,

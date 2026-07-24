@@ -66,6 +66,11 @@ name = "cuda_canary"
 path = "tests/cuda_canary.rs"
 required-features = ["cuda"]
 
+[[test]]
+name = "cuda_benchmark"
+path = "tests/cuda_benchmark.rs"
+required-features = ["cuda"]
+
 [dev-dependencies]
 pretty_assertions = "1"
 tempfile = "3"
