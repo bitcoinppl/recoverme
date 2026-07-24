@@ -76,6 +76,12 @@ pub fn create_deriver(
         BackendKind::CudaHybrid => Err(RecoverError::BackendUnavailable(
             "cuda-hybrid requires a persisted autotuned configuration".into(),
         )),
+        #[cfg(not(all(
+            feature = "cube-cpu",
+            feature = "metal",
+            feature = "cuda",
+            target_os = "macos"
+        )))]
         unavailable => Err(RecoverError::BackendUnavailable(unavailable.to_string())),
     }
 }

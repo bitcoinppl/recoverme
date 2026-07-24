@@ -1,6 +1,7 @@
 //! Deterministic, resumable BIP39 passphrase recovery
 
 pub mod backend;
+pub mod benchmark;
 pub mod config;
 pub mod crypto;
 #[cfg(any(
