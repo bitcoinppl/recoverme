@@ -7,7 +7,7 @@ allowed_env = []
 required_secret_env = []
 
 [workloads.cuda-benchmark]
-image = "ghcr.io/bitcoinppl/recoverme-cuda-canary:benchmark-3d62d56@sha256:2a3d7ac3dc6768bac54e6a36c7676a4a095c790cd339b1e65cc1ca0b5cb6ca66"
+image = "ghcr.io/bitcoinppl/recoverme-cuda-canary:pure-e28802b@sha256:810431c8f0eff88365f15db7a0047b8bbd9ada0a608c28120f1f2f7f5e0cc4b2"
 command = ["/usr/local/bin/recoverme-cuda-benchmark", "--ignored", "--exact", "cuda_sustained_xfp_and_xpub_throughput", "--nocapture", "--test-threads=1"]
 allowed_env = ["RAYON_NUM_THREADS"]
 required_secret_env = []
