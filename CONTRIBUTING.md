@@ -36,6 +36,19 @@ uv run pytest -m "not cuda"
 CUDA behavior should be tested on supported NVIDIA hardware. Set
 `RECOVERME_REQUIRE_CUDA=1` when a missing CUDA device must fail the suite.
 
+## GPUQ CUDA canary
+
+Build and push the CUDA canary:
+
+```sh
+tests/cuda-canary/build-image.sh ghcr.io/bitcoinppl/recoverme-cuda-canary:<tag>
+```
+
+The script uses Docker Buildx when available, otherwise it falls back to
+Namespace's `nsc` remote builder. It requires `skopeo` to resolve the pushed
+image digest. After the push, copy the digest-qualified image reference printed
+by the script into `gpuq.toml`.
+
 ## Pull requests
 
 Keep changes focused, explain any candidate-order or state-format impact, and
