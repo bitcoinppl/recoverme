@@ -1044,15 +1044,18 @@ fn sha512_compress_host(state: &mut [u64; 8], block: &[u8; 128]) {
     state[7] = state[7].wrapping_add(h);
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(feature = "cube-cpu", all(feature = "metal", target_os = "macos"))
+))]
 mod tests {
-    #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cuda"))]
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     use bip32::{Prefix, XPrv};
     use bip39::{Language, Mnemonic};
 
     use super::*;
     use crate::domain::Candidate;
-    #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cuda"))]
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     use crate::domain::{MasterXpubTarget, TargetFingerprint};
 
     const PUBLIC_TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
@@ -1079,23 +1082,7 @@ mod tests {
         assert_master_xpub_filter(CubeSeedDeriver::metal);
     }
 
-    #[cfg(feature = "cuda")]
-    #[test]
-    #[ignore = "requires a CUDA device"]
-    fn cuda_matches_bip39_reference() {
-        let secret = SecretMnemonic::new(PUBLIC_TEST_MNEMONIC.to_owned());
-        let mut deriver = CubeSeedDeriver::cuda(&secret).unwrap();
-        assert_matches_reference(&mut deriver);
-    }
-
-    #[cfg(feature = "cuda")]
-    #[test]
-    #[ignore = "requires a CUDA device"]
-    fn cuda_compacts_master_chain_code_survivors_and_confirms_public_key() {
-        assert_master_xpub_filter(CubeSeedDeriver::cuda);
-    }
-
-    #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cuda"))]
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     fn assert_master_xpub_filter(
         create_deriver: fn(&SecretMnemonic) -> Result<CubeSeedDeriver, RecoverError>,
     ) {
@@ -1126,11 +1113,7 @@ mod tests {
         assert_eq!(deriver.verify(&candidates, &target).unwrap(), [1]);
     }
 
-    #[cfg(any(
-        feature = "cube-cpu",
-        all(feature = "metal", target_os = "macos"),
-        feature = "cuda"
-    ))]
+    #[cfg(any(feature = "cube-cpu", all(feature = "metal", target_os = "macos")))]
     fn assert_matches_reference(deriver: &mut CubeSeedDeriver) {
         let candidates = vec![
             Candidate::new(
