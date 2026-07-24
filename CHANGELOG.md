@@ -4,11 +4,8 @@
 
 ### CUDA
 
-- Keep CUDA GPU-only by default and add an explicitly auto-tuned
-  `cuda-hybrid` backend
+- Add GPU-first CUDA recovery with CPU public-key confirmation
 - Compact master-XPUB chain-code survivors on the GPU before host readback
-- Select hybrid CPU shares from complete-check benchmarks and retain hybrid
-  mode only when it improves median throughput by at least 3%
 - Bind tuned configurations to the CUDA device, driver, CPU model, and thread
   configuration
 

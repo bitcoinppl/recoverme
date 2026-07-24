@@ -234,8 +234,6 @@ pub enum BackendKind {
     Hybrid,
     /// CubeCL's CUDA runtime
     Cuda,
-    /// Concurrent CPU and CUDA runtime with an autotuned split
-    CudaHybrid,
 }
 
 impl fmt::Display for BackendKind {
@@ -247,7 +245,6 @@ impl fmt::Display for BackendKind {
             Self::Metal => "metal",
             Self::Hybrid => "hybrid",
             Self::Cuda => "cuda",
-            Self::CudaHybrid => "cuda-hybrid",
         };
         formatter.write_str(value)
     }

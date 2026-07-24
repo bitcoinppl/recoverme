@@ -13,7 +13,7 @@ pub mod cube_backend;
 pub mod domain;
 pub mod engine;
 pub mod error;
-#[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cuda"))]
+#[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod hybrid_backend;
 pub mod input;
 pub mod search;

@@ -11,9 +11,8 @@ use crate::{
 #[cfg(all(feature = "metal", target_os = "macos"))]
 const METAL_CPU_SHARE_PERCENT: u8 = 35;
 
-/// Concurrent CPU and CubeCL accelerator recovery backend
+/// Concurrent CPU and Metal recovery backend
 pub struct HybridBackend {
-    kind: BackendKind,
     cpu: CpuSeedDeriver,
     accelerator: CubeSeedDeriver,
     cpu_share: CpuShare,
@@ -25,22 +24,9 @@ impl HybridBackend {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub fn metal(mnemonic: &SecretMnemonic) -> Result<Self, RecoverError> {
         Ok(Self {
-            kind: BackendKind::Hybrid,
             cpu: CpuSeedDeriver::new(mnemonic)?,
             accelerator: CubeSeedDeriver::metal(mnemonic)?,
             cpu_share: METAL_CPU_SHARE_PERCENT.try_into()?,
-            batch_size: 65_536,
-        })
-    }
-
-    /// Construct an explicitly tuned CPU and CUDA backend
-    #[cfg(feature = "cuda")]
-    pub fn cuda(mnemonic: &SecretMnemonic, cpu_share: CpuShare) -> Result<Self, RecoverError> {
-        Ok(Self {
-            kind: BackendKind::CudaHybrid,
-            cpu: CpuSeedDeriver::new(mnemonic)?,
-            accelerator: CubeSeedDeriver::cuda(mnemonic)?,
-            cpu_share,
             batch_size: 65_536,
         })
     }
@@ -67,7 +53,7 @@ fn split_at_cpu_share(
 
 impl RecoveryBackend for HybridBackend {
     fn kind(&self) -> BackendKind {
-        self.kind
+        BackendKind::Hybrid
     }
 
     fn device_name(&self) -> String {

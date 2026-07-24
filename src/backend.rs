@@ -5,7 +5,7 @@ use crate::{
     state::RecoveryState,
 };
 
-#[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cuda"))]
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use crate::hybrid_backend::HybridBackend;
 
 #[cfg(any(
@@ -32,8 +32,6 @@ fn compiled_cube_backends() -> Vec<BackendKind> {
         BackendKind::Hybrid,
         #[cfg(feature = "cuda")]
         BackendKind::Cuda,
-        #[cfg(feature = "cuda")]
-        BackendKind::CudaHybrid,
     ];
     backends.to_vec()
 }
@@ -73,9 +71,6 @@ pub fn create_deriver(
         BackendKind::Hybrid => Ok(Box::new(HybridBackend::metal(mnemonic)?)),
         #[cfg(feature = "cuda")]
         BackendKind::Cuda => Ok(Box::new(CubeSeedDeriver::cuda(mnemonic)?)),
-        BackendKind::CudaHybrid => Err(RecoverError::BackendUnavailable(
-            "cuda-hybrid requires a persisted autotuned configuration".into(),
-        )),
         #[cfg(not(all(
             feature = "cube-cpu",
             feature = "metal",
@@ -92,18 +87,6 @@ pub fn create_configured_deriver(
     mnemonic: &SecretMnemonic,
     configuration: BackendConfiguration,
 ) -> Result<Box<dyn RecoveryBackend>, RecoverError> {
-    #[cfg(feature = "cuda")]
-    if backend == BackendKind::CudaHybrid {
-        let Some(cpu_share) = configuration.cpu_share() else {
-            return Err(RecoverError::InvalidSetting(
-                "cuda-hybrid requires a nonzero CPU share".into(),
-            ));
-        };
-        let mut deriver = HybridBackend::cuda(mnemonic, cpu_share)?;
-        deriver.configure(configuration)?;
-        return Ok(Box::new(deriver));
-    }
-
     let mut deriver = create_deriver(backend, mnemonic)?;
     deriver.configure(configuration)?;
     Ok(deriver)

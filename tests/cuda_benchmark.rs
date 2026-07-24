@@ -16,7 +16,6 @@ const PUBLIC_TEST_WORDS: [&str; 7] = [
 ];
 const TUNING_BATCH_SIZES: [usize; 3] = [262_144, 524_288, 1_048_576];
 const TUNING_WORKGROUP_SIZES: [u32; 3] = [64, 128, 256];
-const TUNING_CPU_SHARES: [u8; 4] = [2, 5, 10, 20];
 const TUNING_REPETITIONS: usize = 2;
 const SUSTAINED_REPETITIONS: usize = 5;
 
@@ -38,35 +37,23 @@ fn cuda_sustained_xfp_and_xpub_throughput() {
     let xfp = autotune_and_benchmark(&plan, &secret, &fingerprint_target).unwrap();
     let xpub = autotune_and_benchmark(&plan, &secret, &target).unwrap();
 
-    for result in [xfp.cuda, xfp.hybrid, xpub.cuda, xpub.hybrid] {
+    for result in [xfp, xpub] {
         assert_eq!(result.matches, 1);
         assert!(result.sustained_checks_per_second.is_finite());
         assert!(result.sustained_checks_per_second > 0.0);
     }
 }
 
-struct ModeResults {
-    cuda: SustainedBenchmarkResult,
-    hybrid: SustainedBenchmarkResult,
-}
-
 fn autotune_and_benchmark(
     plan: &recoverme::search::RecoveryPlan,
     secret: &SecretMnemonic,
     target: &VerificationTarget,
-) -> Result<ModeResults, RecoverError> {
+) -> Result<SustainedBenchmarkResult, RecoverError> {
     let mut cuda_tuning = Vec::new();
     for batch_size in TUNING_BATCH_SIZES {
         for workgroup_size in TUNING_WORKGROUP_SIZES {
             let configuration = BackendConfiguration::cube(batch_size, workgroup_size)?;
-            let result = run_benchmark(
-                plan,
-                secret,
-                target,
-                BackendKind::Cuda,
-                configuration,
-                TUNING_REPETITIONS,
-            )?;
+            let result = run_benchmark(plan, secret, target, configuration, TUNING_REPETITIONS)?;
             print_result("tuning", &result);
             cuda_tuning.push(result);
         }
@@ -79,64 +66,22 @@ fn autotune_and_benchmark(
             .expect("CUDA tuning records a workgroup size"),
     )?;
 
-    let mut hybrid_tuning = Vec::new();
-    for cpu_share in TUNING_CPU_SHARES {
-        let configuration = BackendConfiguration::hybrid(
-            selected_cuda.batch_size,
-            selected_cuda
-                .workgroup_size
-                .expect("CUDA tuning records a workgroup size"),
-            cpu_share,
-        )?;
-        let result = run_benchmark(
-            plan,
-            secret,
-            target,
-            BackendKind::CudaHybrid,
-            configuration,
-            TUNING_REPETITIONS,
-        )?;
-        print_result("tuning", &result);
-        hybrid_tuning.push(result);
-    }
-    let selected_hybrid = select_fastest(hybrid_tuning);
-    let hybrid_configuration = BackendConfiguration::hybrid(
-        selected_hybrid.batch_size,
-        selected_hybrid
-            .workgroup_size
-            .expect("CUDA hybrid tuning records a workgroup size"),
-        selected_hybrid
-            .cpu_share_percent
-            .expect("CUDA hybrid tuning records a CPU share"),
-    )?;
-
     let cuda = run_benchmark(
         plan,
         secret,
         target,
-        BackendKind::Cuda,
         cuda_configuration,
         SUSTAINED_REPETITIONS,
     )?;
     print_result("sustained", &cuda);
-    let hybrid = run_benchmark(
-        plan,
-        secret,
-        target,
-        BackendKind::CudaHybrid,
-        hybrid_configuration,
-        SUSTAINED_REPETITIONS,
-    )?;
-    print_result("sustained", &hybrid);
 
-    Ok(ModeResults { cuda, hybrid })
+    Ok(cuda)
 }
 
 fn run_benchmark(
     plan: &recoverme::search::RecoveryPlan,
     secret: &SecretMnemonic,
     target: &VerificationTarget,
-    backend: BackendKind,
     configuration: BackendConfiguration,
     repetitions: usize,
 ) -> Result<SustainedBenchmarkResult, RecoverError> {
@@ -144,7 +89,7 @@ fn run_benchmark(
         plan,
         secret,
         target,
-        backend,
+        BackendKind::Cuda,
         SustainedBenchmarkConfig {
             sample_size: NonZeroUsize::new(configuration.batch_size().get())
                 .expect("backend configurations use nonzero batch sizes"),

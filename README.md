@@ -128,8 +128,8 @@ cargo build --release --features cuda
 ```
 
 The Metal build also provides a fixed-share `hybrid` backend. The CUDA build
-uses a GPU-only `cuda` backend by default and provides `cuda-hybrid` only after
-it has been tuned on the target machine.
+provides the GPU-only `cuda` backend. Benchmark on the target machine instead
+of assuming an accelerator is faster.
 
 ### Experimental CUDA support
 
@@ -157,22 +157,10 @@ recoverme run \
   --backend cuda
 ```
 
-An optional CPU-assisted CUDA mode is selected separately:
-
-```sh
-recoverme benchmark \
-  --state-dir recovery-state \
-  --backend cuda-hybrid \
-  --autotune
-```
-
-The tuner measures complete checks rather than seed derivations alone. It tests
-small CPU shares around the measured CPU/CUDA rate ratio and retains
-`cuda-hybrid` only when its median complete-check rate is at least 3% faster
-than GPU-only CUDA after synchronization and transfer costs. The saved choice
-is bound to the CUDA device UUID, compute capability, driver version, CPU
-model, and Rayon thread count; retune after hardware, driver, or CPU-thread
-changes.
+The tuner measures complete checks rather than seed derivations alone. The
+saved choice is bound to the CUDA device UUID, compute capability, driver
+version, CPU model, and Rayon thread count; retune after hardware, driver, or
+CPU-thread changes.
 
 CUDA address verification remains a benchmark-only experiment. Moving
 fingerprint or address secp256k1 verification onto CUDA requires independent

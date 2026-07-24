@@ -218,9 +218,6 @@ fn benchmark(args: SessionArgs) -> Result<()> {
     let (inputs, plan, mut state) = load_session(&args.state_dir, &args.secrets)?;
     let backends = if args.backend == BackendKind::Auto {
         available_backends()
-            .into_iter()
-            .filter(|backend| args.autotune || *backend != BackendKind::CudaHybrid)
-            .collect()
     } else {
         vec![args.backend]
     };
@@ -234,12 +231,6 @@ fn benchmark(args: SessionArgs) -> Result<()> {
                 backend,
                 args.sample_size,
             )?;
-        } else if backend == BackendKind::CudaHybrid {
-            return Err(recoverme::error::RecoverError::InvalidSetting(
-                "cuda-hybrid must be selected with `benchmark --backend cuda-hybrid --autotune`"
-                    .into(),
-            )
-            .into());
         } else {
             let record = benchmark_backend(
                 &plan,
@@ -262,10 +253,6 @@ fn autotune_backend(
     sample_size: usize,
 ) -> Result<()> {
     const REPETITIONS: usize = 3;
-
-    if backend == BackendKind::CudaHybrid {
-        return autotune_cuda_hybrid(plan, state, mnemonic, sample_size);
-    }
 
     let mut accelerator_batch_sizes = vec![
         sample_size.saturating_div(4).max(1),
@@ -351,135 +338,6 @@ fn autotune_backend(
     Ok(())
 }
 
-fn autotune_cuda_hybrid(
-    plan: &RecoveryPlan,
-    state: &mut RecoveryState,
-    mnemonic: &recoverme::domain::SecretMnemonic,
-    sample_size: usize,
-) -> Result<()> {
-    const REPETITIONS: usize = 5;
-    const MINIMUM_IMPROVEMENT: f64 = 1.03;
-
-    autotune_backend(plan, state, mnemonic, BackendKind::Cuda, sample_size)?;
-    let cuda = state
-        .latest_benchmark(BackendKind::Cuda)
-        .cloned()
-        .expect("CUDA autotuning records its selected configuration");
-    let cuda_configuration = cuda.configuration()?;
-    let batch_size = cuda_configuration.batch_size().get();
-    let workgroup_size = cuda_configuration
-        .workgroup_size()
-        .expect("CUDA configuration has a workgroup size")
-        .get();
-    let cpu_configuration = state
-        .latest_benchmark(BackendKind::Cpu)
-        .map(recoverme::state::BenchmarkRecord::configuration)
-        .transpose()?
-        .unwrap_or(BackendConfiguration::cpu(
-            rayon::current_num_threads().max(1) * 512,
-        )?);
-    let cpu = measure_backend_with_config(
-        plan,
-        state,
-        mnemonic,
-        BackendKind::Cpu,
-        batch_size,
-        cpu_configuration,
-    )?;
-    let cuda_rate = cuda.checks_per_second;
-    let cpu_rate = cpu.checks_per_second;
-    let shares = cuda_hybrid_cpu_shares(cpu_rate, cuda_rate)?;
-
-    let mut gpu_only_records = Vec::with_capacity(REPETITIONS);
-    let mut hybrid_records = shares
-        .iter()
-        .map(|share| (*share, Vec::with_capacity(REPETITIONS)))
-        .collect::<Vec<_>>();
-
-    for _ in 0..REPETITIONS {
-        gpu_only_records.push(measure_backend_with_config(
-            plan,
-            state,
-            mnemonic,
-            BackendKind::Cuda,
-            batch_size,
-            cuda_configuration,
-        )?);
-        for (share, records) in &mut hybrid_records {
-            records.push(measure_backend_with_config(
-                plan,
-                state,
-                mnemonic,
-                BackendKind::CudaHybrid,
-                batch_size,
-                BackendConfiguration::hybrid(batch_size, workgroup_size, *share)?,
-            )?);
-        }
-    }
-
-    let gpu_only = median_benchmark(gpu_only_records);
-    let best_hybrid = hybrid_records
-        .into_iter()
-        .map(|(_, records)| median_benchmark(records))
-        .max_by(|left, right| left.checks_per_second.total_cmp(&right.checks_per_second))
-        .expect("CUDA hybrid tuning always has candidate shares");
-    println!(
-        "CUDA GPU-only median: {:.1} complete checks/s",
-        gpu_only.checks_per_second
-    );
-    print_benchmark(&best_hybrid);
-
-    if !hybrid_beats_cuda(
-        gpu_only.checks_per_second,
-        best_hybrid.checks_per_second,
-        MINIMUM_IMPROVEMENT,
-    ) {
-        state.clear_benchmark(BackendKind::CudaHybrid)?;
-        println!(
-            "Selected cuda: hybrid improvement was below {:.0}%",
-            (MINIMUM_IMPROVEMENT - 1.0) * 100.0
-        );
-        return Ok(());
-    }
-
-    state.record_benchmark(best_hybrid.clone())?;
-    println!(
-        "Selected cuda-hybrid: CPU share={}%, {:.1} complete checks/s",
-        best_hybrid
-            .cpu_share_percent
-            .expect("hybrid benchmark records its CPU share"),
-        best_hybrid.checks_per_second
-    );
-    Ok(())
-}
-
-fn cuda_hybrid_cpu_shares(
-    cpu_rate: f64,
-    cuda_rate: f64,
-) -> std::result::Result<Vec<u8>, recoverme::error::RecoverError> {
-    if !cpu_rate.is_finite() || cpu_rate <= 0.0 || !cuda_rate.is_finite() || cuda_rate <= 0.0 {
-        return Err(recoverme::error::RecoverError::InvalidSetting(
-            "CUDA hybrid tuning requires positive finite CPU and CUDA complete-check rates".into(),
-        ));
-    }
-
-    let proportional_share = (100.0 * cpu_rate / (cpu_rate + cuda_rate)).round() as i16;
-    let mut shares = vec![2_i16, 5, 10, 20];
-    shares.extend([
-        proportional_share - 2,
-        proportional_share,
-        proportional_share + 2,
-    ]);
-    shares.retain(|share| (1..=99).contains(share));
-    shares.sort_unstable();
-    shares.dedup();
-    Ok(shares.into_iter().map(|share| share as u8).collect())
-}
-
-fn hybrid_beats_cuda(cuda_rate: f64, hybrid_rate: f64, minimum_ratio: f64) -> bool {
-    hybrid_rate >= cuda_rate * minimum_ratio
-}
-
 fn median_benchmark(
     mut records: Vec<recoverme::state::BenchmarkRecord>,
 ) -> recoverme::state::BenchmarkRecord {
@@ -510,9 +368,7 @@ fn print_benchmark(record: &recoverme::state::BenchmarkRecord) {
 fn quick_sample_size(backend: BackendKind) -> usize {
     match backend {
         BackendKind::Cpu | BackendKind::CubeCpu => 4_096,
-        BackendKind::Metal | BackendKind::Hybrid | BackendKind::Cuda | BackendKind::CudaHybrid => {
-            16_384
-        }
+        BackendKind::Metal | BackendKind::Hybrid | BackendKind::Cuda => 16_384,
         BackendKind::Auto => 4_096,
     }
 }
@@ -521,9 +377,6 @@ fn run(args: RunArgs) -> Result<()> {
     let (inputs, plan, mut state) = load_session(&args.state_dir, &args.secrets)?;
     if args.backend == BackendKind::Auto {
         for backend in available_backends() {
-            if backend == BackendKind::CudaHybrid {
-                continue;
-            }
             if state.latest_benchmark(backend).is_some() {
                 continue;
             }
@@ -542,13 +395,6 @@ fn run(args: RunArgs) -> Result<()> {
     }
     let backend = resolve_backend(args.backend, &state);
     if state.latest_benchmark(backend).is_none() {
-        if backend == BackendKind::CudaHybrid {
-            return Err(recoverme::error::RecoverError::InvalidSetting(
-                "cuda-hybrid has no selected configuration; run `benchmark --backend cuda-hybrid --autotune` first"
-                    .into(),
-            )
-            .into());
-        }
         let record = benchmark_backend(
             &plan,
             &mut state,
@@ -772,21 +618,5 @@ mod tests {
             panic!("expected plan command");
         };
         assert!(args.secrets.load().is_err());
-    }
-
-    #[test]
-    fn cuda_hybrid_share_candidates_include_small_and_rate_proportional_splits() {
-        assert_eq!(
-            cuda_hybrid_cpu_shares(100.0, 900.0).unwrap(),
-            [2, 5, 8, 10, 12, 20]
-        );
-        assert_eq!(cuda_hybrid_cpu_shares(1.0, 999.0).unwrap(), [2, 5, 10, 20]);
-        assert!(cuda_hybrid_cpu_shares(0.0, 100.0).is_err());
-    }
-
-    #[test]
-    fn cuda_hybrid_requires_three_percent_complete_check_improvement() {
-        assert!(!hybrid_beats_cuda(100.0, 102.9, 1.03));
-        assert!(hybrid_beats_cuda(100.0, 103.0, 1.03));
     }
 }

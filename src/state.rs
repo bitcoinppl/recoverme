@@ -92,7 +92,7 @@ impl BenchmarkRecord {
                     })?,
                 )
             }
-            BackendKind::Hybrid | BackendKind::CudaHybrid => BackendConfiguration::hybrid(
+            BackendKind::Hybrid => BackendConfiguration::hybrid(
                 self.batch_size,
                 self.workgroup_size.ok_or_else(|| {
                     RecoverError::InvalidSetting(format!(
@@ -100,13 +100,7 @@ impl BenchmarkRecord {
                         self.backend
                     ))
                 })?,
-                self.cpu_share_percent
-                    .or((self.backend == BackendKind::Hybrid).then_some(35))
-                    .ok_or_else(|| {
-                        RecoverError::InvalidSetting(
-                            "cuda-hybrid benchmark is missing its CPU share".into(),
-                        )
-                    })?,
+                self.cpu_share_percent.unwrap_or(35),
             ),
             BackendKind::Auto => Err(RecoverError::InvalidSetting(
                 "auto cannot be stored as a benchmark backend".into(),
@@ -328,14 +322,6 @@ impl RecoveryState {
         self.save_runtime()
     }
 
-    /// Remove the selected benchmark for one backend
-    pub fn clear_benchmark(&mut self, backend: BackendKind) -> Result<(), RecoverError> {
-        self.runtime
-            .benchmarks
-            .retain(|record| record.backend != backend);
-        self.save_runtime()
-    }
-
     /// Mark one pending candidate as a false XFP collision
     pub fn reject_match(&mut self, id: &str) -> Result<(), RecoverError> {
         let Some(record) = self
@@ -516,7 +502,7 @@ mod tests {
             candidates: 1_024,
             batch_size: 65_536,
             workgroup_size: (backend != BackendKind::Cpu).then_some(64),
-            cpu_share_percent: (backend == BackendKind::CudaHybrid).then_some(5),
+            cpu_share_percent: (backend == BackendKind::Hybrid).then_some(35),
             hardware_signature: Some("test-hardware".into()),
             seeds_per_second: checks_per_second,
             checks_per_second,
@@ -597,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn benchmark_selection_is_unique_per_backend_and_can_be_cleared() {
+    fn benchmark_selection_is_unique_per_backend() {
         let directory = tempdir().unwrap();
         let mut state = state(directory.path());
         state
@@ -615,19 +601,13 @@ mod tests {
                 .checks_per_second,
             20.0
         );
-
-        state.clear_benchmark(BackendKind::Cuda).unwrap();
-        assert!(state.latest_benchmark(BackendKind::Cuda).is_none());
     }
 
     #[test]
-    fn cuda_hybrid_configuration_requires_a_persisted_cpu_share() {
-        let mut record = benchmark(BackendKind::CudaHybrid, 20.0);
+    fn legacy_hybrid_configuration_uses_the_fixed_cpu_share() {
+        let mut record = benchmark(BackendKind::Hybrid, 20.0);
         record.cpu_share_percent = None;
 
-        assert!(record.configuration().is_err());
-
-        record.backend = BackendKind::Hybrid;
         assert_eq!(
             record
                 .configuration()
